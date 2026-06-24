@@ -1,7 +1,17 @@
 //! The [`SValue`] trait, mapping Rust types to and from a [`Scalar`].
 
-use super::Scalar;
-use crate::error::{SdbError, SdbResult};
+use super::{
+    leaf::{Leaf, LeafMut},
+    definition::SData,
+    Scalar,
+};
+
+use crate::{
+    access::{Reader, Writer},
+    error::{SdbError, SdbResult},
+    path::SPath,
+};
+
 use chrono::{DateTime, NaiveDate, NaiveTime, TimeDelta, Utc};
 use uuid::Uuid;
 
@@ -114,3 +124,49 @@ impl<T: SValue> SValue for Option<T> {
         }
     }
 }
+
+// Every scalar is also `SData`: it stores as a single leaf, so a struct field of
+// scalar type and a composite field decompose through the same trait. The impls
+// are concrete (not a blanket over `SValue`) to stay coherent with the derived
+// and container impls.
+macro_rules! scalar_sdata {
+    ($t:ty) => {
+        impl SData for $t {
+            type Mut<'t> = LeafMut<'t, $t>;
+            type Ref<'t> = Leaf<'t, $t>;
+
+            fn store<W: Writer>(&self, writer: &W, at: &SPath) -> SdbResult<()> {
+                writer.put_scalar(at, self.to_scalar())
+            }
+
+            fn load<R: Reader>(reader: &R, at: &SPath) -> SdbResult<Self> {
+                match reader.scalar_at(at)? {
+                    Some(scalar) => <$t>::from_scalar(&scalar),
+                    None => Err(SdbError::PathNotFound(at.clone())),
+                }
+            }
+        }
+    };
+}
+
+scalar_sdata!(bool);
+scalar_sdata!(i8);
+scalar_sdata!(i16);
+scalar_sdata!(i32);
+scalar_sdata!(i64);
+scalar_sdata!(i128);
+scalar_sdata!(u8);
+scalar_sdata!(u16);
+scalar_sdata!(u32);
+scalar_sdata!(u64);
+scalar_sdata!(u128);
+scalar_sdata!(f32);
+scalar_sdata!(f64);
+scalar_sdata!(usize);
+scalar_sdata!(isize);
+scalar_sdata!(String);
+scalar_sdata!(Uuid);
+scalar_sdata!(NaiveDate);
+scalar_sdata!(NaiveTime);
+scalar_sdata!(DateTime<Utc>);
+scalar_sdata!(TimeDelta);

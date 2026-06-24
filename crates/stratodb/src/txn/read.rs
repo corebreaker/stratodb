@@ -1,15 +1,18 @@
-//! Opaque read and write transactions.
+//! Opaque read transaction.
 
 use crate::{
-    data::{Scalar, SValue},
+    access::{ReadCursor, Reader},
+    data::{refs::SRef, SData, SValue, Scalar},
     engine::{self, TableKey, TableValue},
-    error::SdbResult,
+    error::{SdbError, SdbResult},
     node::NodeKind,
-    path::SPath,
+    path::{SPath, Segment},
     tree,
+    Skey,
 };
 
 use redb::{ReadOnlyTable, ReadTransaction, TableError};
+use std::sync::Arc;
 
 /// A read-only view of a table at a consistent point in time.
 pub struct ReadTxn {
@@ -70,5 +73,73 @@ impl ReadTxn {
     /// Returns whether a node exists at `path`.
     pub fn exists(&self, path: &str) -> SdbResult<bool> {
         Ok(self.kind(path)?.is_some())
+    }
+
+    /// Reads a typed read accessor for the value at `path`.
+    pub fn fetch<'t, A: SRef<'t>>(&'t self, path: &str) -> SdbResult<A> {
+        let base = SPath::parse(path)?;
+        let cursor = ReadCursor::new(self);
+        let key = cursor
+            .resolve(&base)?
+            .ok_or_else(|| SdbError::PathNotFound(base.clone()))?;
+
+        Ok(A::open(Arc::new(cursor), base, key))
+    }
+
+    /// Recomposes a whole `T` from the subtree at `path`.
+    pub fn load<T: SData>(&self, path: &str) -> SdbResult<T> {
+        let base = SPath::parse(path)?;
+
+        T::load(&ReadCursor::new(self), &base)
+    }
+
+    // -- node-level reads used by `ReadCursor` (the table is opened per call) --
+
+    pub(crate) fn lookup_path(&self, path: &SPath) -> SdbResult<Option<Skey>> {
+        let Some(table) = self.open()? else {
+            return Ok(None);
+        };
+
+        tree::resolve(&table, path)
+    }
+
+    pub(crate) fn lookup_child(&self, parent: Skey, seg: &Segment) -> SdbResult<Option<Skey>> {
+        let Some(table) = self.open()? else {
+            return Ok(None);
+        };
+
+        tree::child_key(&table, parent, seg)
+    }
+
+    pub(crate) fn lookup_scalar(&self, key: Skey) -> SdbResult<Scalar> {
+        let table = self
+            .open()?
+            .ok_or_else(|| SdbError::Corrupt("read on a missing table".into()))?;
+
+        tree::scalar_at(&table, key)
+    }
+
+    pub(crate) fn lookup_scalar_at(&self, path: &SPath) -> SdbResult<Option<Scalar>> {
+        let Some(table) = self.open()? else {
+            return Ok(None);
+        };
+
+        tree::get_scalar(&table, path)
+    }
+
+    pub(crate) fn lookup_kind(&self, key: Skey) -> SdbResult<Option<NodeKind>> {
+        let Some(table) = self.open()? else {
+            return Ok(None);
+        };
+
+        tree::kind_of(&table, key)
+    }
+
+    pub(crate) fn lookup_len(&self, key: Skey) -> SdbResult<usize> {
+        let table = self
+            .open()?
+            .ok_or_else(|| SdbError::Corrupt("read on a missing table".into()))?;
+
+        tree::list_len(&table, key)
     }
 }
