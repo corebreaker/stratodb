@@ -396,3 +396,47 @@ fn unique_index_rejects_duplicates() {
         1
     );
 }
+
+#[test]
+fn create_index_backfills_existing_data() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = StratoDb::create(dir.path().join("e2e_backfill.stratodb")).unwrap();
+    let users = db.open_table("users").unwrap();
+
+    // Populate the table *before* the index exists.
+    let w = users.write().unwrap();
+    w.put("users/alice/age", &30i32).unwrap();
+    w.put("users/bob/age", &30i32).unwrap();
+    w.put("users/carol/age", &40i32).unwrap();
+    w.commit().unwrap();
+
+    // Creating the index now back-fills those pre-existing rows.
+    users.create_index(&single("by_age", "age", false)).unwrap();
+    assert_eq!(count_at(&db, "users", "by_age", 30), 2);
+    assert_eq!(count_at(&db, "users", "by_age", 40), 1);
+
+    // And later writes keep maintaining it.
+    let w = users.write().unwrap();
+    w.put("users/dave/age", &30i32).unwrap();
+    w.commit().unwrap();
+    assert_eq!(count_at(&db, "users", "by_age", 30), 3);
+}
+
+#[test]
+fn creating_a_unique_index_over_duplicates_is_rejected() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = StratoDb::create(dir.path().join("e2e_backfill_unique.stratodb")).unwrap();
+    let users = db.open_table("users").unwrap();
+
+    // Two pre-existing rows share a value.
+    let w = users.write().unwrap();
+    w.put("users/alice/age", &30i32).unwrap();
+    w.put("users/bob/age", &30i32).unwrap();
+    w.commit().unwrap();
+
+    // Back-filling a unique index over them fails — and the whole creation rolls
+    // back, leaving no index registered.
+    let err = users.create_index(&single("uby_age", "age", true)).unwrap_err();
+    assert!(matches!(err, SdbError::UniqueViolation { .. }), "got {err:?}");
+    assert!(users.index_def("uby_age").unwrap().is_none());
+}

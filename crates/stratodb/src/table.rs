@@ -3,9 +3,10 @@
 use crate::{
     cache::PathCache,
     db::DbInner,
-    engine::META_TABLE,
+    engine::{self, META_TABLE},
     error::{SdbError, SdbResult},
-    index::{registry, IndexDef, SIndexed},
+    index::{maintenance, registry, IndexDef, SIndexed},
+    path::SPath,
     txn::{ReadTxn, WriteTxn},
 };
 
@@ -70,19 +71,34 @@ impl Table {
         Ok(WriteTxn::new(txn, self.name.clone(), Arc::clone(&self.inner)))
     }
 
-    /// Registers a secondary index on this table.
+    /// Registers a secondary index on this table and back-fills it.
     ///
     /// Idempotent for an identical definition; errors with
     /// [`SchemaMismatch`](crate::SdbError::SchemaMismatch) if `def.name` already
-    /// names a different index here. Subsequent writes maintain the index and
-    /// queries can use it; existing data is **not** back-filled, so create indexes
-    /// before populating the table.
+    /// names a different index here. On first creation, every pre-existing entity
+    /// the index matches is indexed too, so the index is correct whether data was
+    /// written before or after — and creating a unique index over duplicate data
+    /// fails with [`UniqueViolation`](crate::SdbError::UniqueViolation).
     pub fn create_index(&self, def: &IndexDef) -> SdbResult<()> {
         let txn = self.inner.db.begin_write()?;
-        {
+
+        // Register; on a fresh creation, recover the entry (it carries the new id)
+        // so the back-fill below can build its keys.
+        let new_entry = {
             let mut meta = txn.open_table(META_TABLE)?;
-            registry::create(&mut meta, &self.name, def)?;
+            if registry::create(&mut meta, &self.name, def)? {
+                registry::lookup(&meta, &self.name, def.name())?
+            } else {
+                None
+            }
+        };
+
+        // Back-fill: index every entity the new index already matches.
+        if let Some(entry) = new_entry {
+            let mut data = txn.open_table(engine::data_def(&self.name))?;
+            maintenance::insert(&mut data, std::slice::from_ref(&entry), &SPath::root())?;
         }
+
         txn.commit()?;
 
         Ok(())
@@ -90,8 +106,8 @@ impl Table {
 
     /// Registers every index that `T` declares (via `#[sdata(index(...))]`),
     /// scoping each to `pattern`. A shorthand for calling [`create_index`] for each
-    /// of [`T::index_defs`](SIndexed::index_defs); same idempotency and back-fill
-    /// caveats apply.
+    /// of [`T::index_defs`](SIndexed::index_defs); each is idempotent and
+    /// back-filled.
     pub fn create_indexes<T: SIndexed>(&self, pattern: &str) -> SdbResult<()> {
         for def in T::index_defs(pattern) {
             self.create_index(&def)?;

@@ -159,3 +159,89 @@ fn derived_index_attributes_declare_and_create() {
 
     assert!(matches!(err, SdbError::UniqueViolation { .. }), "got {err:?}");
 }
+
+#[derive(SData, Debug, PartialEq)]
+#[sdata(index(name = "by_dept", columns(dept)))]
+#[sdata(index(name = "by_dept_salary", columns(dept, salary desc)))]
+#[sdata(index(name = "by_email", columns(email), unique))]
+struct Employee {
+    dept:   String,
+    salary: i64,
+    email:  String,
+}
+
+fn employee(dept: &str, salary: i64, email: &str) -> Employee {
+    Employee {
+        dept: String::from(dept),
+        salary,
+        email: String::from(email),
+    }
+}
+
+/// A realistic flow tying the index features together: populate first, declare
+/// indexes (back-fill), composite prefix query, unique enforcement, update-time
+/// maintenance, and persistence across reopen.
+#[test]
+fn employees_indexes_end_to_end() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("employees.stratodb");
+
+    {
+        let db = StratoDb::create(&path).unwrap();
+        let employees = db.open_table("employees").unwrap();
+
+        // Populate before declaring indexes — back-fill must cover these rows.
+        let w = employees.write().unwrap();
+        w.store("employees/e1", &employee("eng", 120, "a@x")).unwrap();
+        w.store("employees/e2", &employee("eng", 150, "b@x")).unwrap();
+        w.store("employees/e3", &employee("sales", 90, "c@x")).unwrap();
+        w.commit().unwrap();
+
+        employees.create_indexes::<Employee>("employees/*").unwrap();
+
+        // Prefix on the composite (dept, salary desc): eng staff, highest paid first.
+        let eng: Vec<Employee> = employees
+            .read()
+            .unwrap()
+            .query("by_dept_salary")
+            .prefixed(&[Scalar::Str(String::from("eng"))])
+            .run()
+            .unwrap();
+        assert_eq!(eng.iter().map(|e| e.salary).collect::<Vec<_>>(), vec![150, 120]);
+
+        // The unique email index is enforced (e1 already uses "a@x").
+        let w = employees.write().unwrap();
+        let clash = w.store("employees/e4", &employee("eng", 100, "a@x")).unwrap_err();
+        assert!(matches!(clash, SdbError::UniqueViolation { .. }), "got {clash:?}");
+        drop(w);
+
+        // Moving e3 from sales to eng re-indexes it on every index.
+        let w = employees.write().unwrap();
+        w.store("employees/e3", &employee("eng", 80, "c@x")).unwrap();
+        w.commit().unwrap();
+
+        let r = employees.read().unwrap();
+        assert_eq!(
+            r.find::<Employee>("by_dept", &[Scalar::Str(String::from("sales"))])
+                .unwrap()
+                .len(),
+            0
+        );
+        assert_eq!(
+            r.find::<Employee>("by_dept", &[Scalar::Str(String::from("eng"))])
+                .unwrap()
+                .len(),
+            3
+        );
+    }
+
+    // Index definitions and entries survive a reopen.
+    let db = StratoDb::open(&path).unwrap();
+    let employees = db.open_table("employees").unwrap();
+    let eng: Vec<Employee> = employees
+        .read()
+        .unwrap()
+        .find("by_dept", &[Scalar::Str(String::from("eng"))])
+        .unwrap();
+    assert_eq!(eng.len(), 3);
+}

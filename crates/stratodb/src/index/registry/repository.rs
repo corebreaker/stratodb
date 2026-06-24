@@ -101,7 +101,9 @@ impl RegistryRepository {
         Ok(entries)
     }
 
-    pub(super) fn create(meta: &mut MetaTable<'_>, table: &str, def: &IndexDef) -> SdbResult<IndexId> {
+    /// Registers `def`, returning whether a new index was created (`false` when an
+    /// identical one already existed — idempotent).
+    pub(super) fn create(meta: &mut MetaTable<'_>, table: &str, def: &IndexDef) -> SdbResult<bool> {
         let mut registry = Self::load(meta)?;
         let entry = registry
             .entries
@@ -110,7 +112,7 @@ impl RegistryRepository {
 
         if let Some(entry) = entry {
             if entry.def() == def {
-                return Ok(entry.id());
+                return Ok(false);
             }
 
             return Err(SdbError::SchemaMismatch(format!(
@@ -120,13 +122,17 @@ impl RegistryRepository {
         }
 
         let id = IndexId(registry.next_id);
-        registry.next_id += 1;
+        registry.next_id = registry
+            .next_id
+            .checked_add(1)
+            .ok_or_else(|| SdbError::Corrupt("index registry id counter overflow".into()))?;
+
         registry
             .entries
             .push(IndexEntry::new(table.to_string(), id, def.clone()));
 
         registry.store(meta)?;
 
-        Ok(id)
+        Ok(true)
     }
 }
