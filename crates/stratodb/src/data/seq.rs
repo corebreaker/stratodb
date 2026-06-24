@@ -69,14 +69,19 @@ impl<'t, T: SData> Seq<'t, T> {
     /// A read accessor over the element at `index`.
     pub fn get(&self, index: usize) -> SdbResult<T::Ref<'t>> {
         let at = self.base.child_index(index as u64);
-        let key = self
-            .reader
-            .child(self.key, &Segment::Index(index as u64))?
-            .ok_or_else(|| SdbError::IndexOutOfRange {
-                path:  at.clone(),
+        let found = self.reader.child_cached(self.key, &Segment::Index(index as u64), &at)?;
+
+        let Some(key) = found else {
+            // Fetched lazily, on the error path only: if it fails too, propagate
+            // that error rather than reporting a misleading `len: 0`.
+            let len = self.len()?;
+
+            return Err(SdbError::IndexOutOfRange {
+                path:  at,
                 index: index as u64,
-                len:   self.len().unwrap_or(0) as u64,
-            })?;
+                len:   len as u64,
+            });
+        };
 
         Ok(<T::Ref<'t> as SRef<'t>>::open(Arc::clone(&self.reader), at, key))
     }
@@ -125,14 +130,19 @@ impl<'t, T: SData> SeqMut<'t, T> {
     /// A write accessor over the element at `index`.
     pub fn get(&self, index: usize) -> SdbResult<T::Mut<'t>> {
         let at = self.base.child_index(index as u64);
-        let key = self
-            .writer
-            .child(self.key, &Segment::Index(index as u64))?
-            .ok_or_else(|| SdbError::IndexOutOfRange {
-                path:  at.clone(),
+        let found = self.writer.child_cached(self.key, &Segment::Index(index as u64), &at)?;
+
+        let Some(key) = found else {
+            // Fetched lazily, on the error path only: if it fails too, propagate
+            // that error rather than reporting a misleading `len: 0`.
+            let len = self.len()?;
+
+            return Err(SdbError::IndexOutOfRange {
+                path:  at,
                 index: index as u64,
-                len:   self.len().unwrap_or(0) as u64,
-            })?;
+                len:   len as u64,
+            });
+        };
 
         Ok(<T::Mut<'t> as SMut<'t>>::open(Arc::clone(&self.writer), at, key))
     }

@@ -139,6 +139,32 @@ impl ReadTxn {
         tree::child_key(&table, parent, seg)
     }
 
+    /// Resolves `parent`'s `seg` child, consulting and populating the shared cache
+    /// under the child's full path. `child_path` must equal `parent`'s path
+    /// followed by `seg`; since `parent` was itself resolved at this snapshot's
+    /// generation, the one-hop result is the correct resolution of `child_path`.
+    pub(crate) fn lookup_child_cached(
+        &self,
+        parent: Skey,
+        seg: &Segment,
+        child_path: &SPath,
+    ) -> SdbResult<Option<Skey>> {
+        if let Some(key) = self.cache.get(self.generation, child_path)? {
+            return Ok(Some(key));
+        }
+
+        let Some(table) = self.open()? else {
+            return Ok(None);
+        };
+
+        let resolved = tree::child_key(&table, parent, seg)?;
+        if let Some(key) = resolved {
+            self.cache.put(self.generation, child_path, key)?;
+        }
+
+        Ok(resolved)
+    }
+
     pub(crate) fn lookup_scalar(&self, key: Skey) -> SdbResult<Scalar> {
         let table = self
             .open()?

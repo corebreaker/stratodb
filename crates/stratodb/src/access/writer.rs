@@ -41,6 +41,12 @@ impl Reader for Box<dyn Writer + '_> {
         this.child(parent, seg)
     }
 
+    fn child_cached(&self, parent: Skey, seg: &Segment, child_path: &SPath) -> SdbResult<Option<Skey>> {
+        let this = Box::as_ref(self);
+
+        this.child_cached(parent, seg, child_path)
+    }
+
     fn scalar(&self, key: Skey) -> SdbResult<Scalar> {
         let this = Box::as_ref(self);
 
@@ -103,6 +109,12 @@ impl Reader for Arc<dyn Writer + '_> {
         let this = Arc::as_ref(self);
 
         this.child(parent, seg)
+    }
+
+    fn child_cached(&self, parent: Skey, seg: &Segment, child_path: &SPath) -> SdbResult<Option<Skey>> {
+        let this = Arc::as_ref(self);
+
+        this.child_cached(parent, seg, child_path)
     }
 
     fn scalar(&self, key: Skey) -> SdbResult<Scalar> {

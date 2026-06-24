@@ -17,6 +17,22 @@ pub trait Reader {
     /// The child key under `parent` for `seg`, if present.
     fn child(&self, parent: Skey, seg: &Segment) -> SdbResult<Option<Skey>>;
 
+    /// Like [`child`](Reader::child), but may serve the answer from a shared
+    /// path-resolution cache.
+    ///
+    /// `child_path` is the child node's full path (`parent`'s path followed by
+    /// `seg`); a cache-backed reader uses it as the cache key, so navigating to
+    /// the same node again — from any accessor or any transaction of the same
+    /// database generation — costs no I/O. The default implementation ignores
+    /// `child_path` and simply performs the lookup, which is what write cursors
+    /// rely on (a writer sees its own uncommitted changes, so its resolutions
+    /// must never be cached).
+    fn child_cached(&self, parent: Skey, seg: &Segment, child_path: &SPath) -> SdbResult<Option<Skey>> {
+        let _ = child_path;
+
+        self.child(parent, seg)
+    }
+
     /// The scalar held by leaf node `key`.
     fn scalar(&self, key: Skey) -> SdbResult<Scalar>;
 
@@ -41,6 +57,12 @@ impl Reader for Box<dyn Reader + '_> {
         let this = Box::as_ref(self);
 
         this.child(parent, seg)
+    }
+
+    fn child_cached(&self, parent: Skey, seg: &Segment, child_path: &SPath) -> SdbResult<Option<Skey>> {
+        let this = Box::as_ref(self);
+
+        this.child_cached(parent, seg, child_path)
     }
 
     fn scalar(&self, key: Skey) -> SdbResult<Scalar> {
@@ -79,6 +101,12 @@ impl Reader for Arc<dyn Reader + '_> {
         let this = Arc::as_ref(self);
 
         this.child(parent, seg)
+    }
+
+    fn child_cached(&self, parent: Skey, seg: &Segment, child_path: &SPath) -> SdbResult<Option<Skey>> {
+        let this = Arc::as_ref(self);
+
+        this.child_cached(parent, seg, child_path)
     }
 
     fn scalar(&self, key: Skey) -> SdbResult<Scalar> {
@@ -127,6 +155,10 @@ impl Reader for ReadCursor<'_> {
 
     fn child(&self, parent: Skey, seg: &Segment) -> SdbResult<Option<Skey>> {
         self.txn.lookup_child(parent, seg)
+    }
+
+    fn child_cached(&self, parent: Skey, seg: &Segment, child_path: &SPath) -> SdbResult<Option<Skey>> {
+        self.txn.lookup_child_cached(parent, seg, child_path)
     }
 
     fn scalar(&self, key: Skey) -> SdbResult<Scalar> {

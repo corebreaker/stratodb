@@ -9,6 +9,7 @@ use stratodb::{
         SData,
     },
     path::{SPath, Segment},
+    SdbError,
     SdbResult,
     Skey,
     StratoDb,
@@ -52,8 +53,13 @@ struct StratoInner<'t> {
 
 impl<'t> StratoInner<'t> {
     fn y(&self) -> SdbResult<Leaf<'t, i64>> {
-        let key = child(&self.reader, self.key, "y", &self.base)?;
-        Ok(SRef::open(Arc::clone(&self.reader), self.base.child_name("y"), key))
+        let at = self.base.child_name("y");
+        let key = self
+            .reader
+            .child_cached(self.key, &Segment::Name(String::from("y")), &at)?
+            .ok_or_else(|| SdbError::PathNotFound(at.clone()))?;
+
+        Ok(SRef::open(Arc::clone(&self.reader), at, key))
     }
 }
 
@@ -137,13 +143,23 @@ struct StratoSample<'t> {
 
 impl<'t> StratoSample<'t> {
     fn x(&self) -> SdbResult<Leaf<'t, u32>> {
-        let key = child(&self.reader, self.key, "x", &self.base)?;
-        Ok(SRef::open(Arc::clone(&self.reader), self.base.child_name("x"), key))
+        let at = self.base.child_name("x");
+        let key = self
+            .reader
+            .child_cached(self.key, &Segment::Name(String::from("x")), &at)?
+            .ok_or_else(|| SdbError::PathNotFound(at.clone()))?;
+
+        Ok(SRef::open(Arc::clone(&self.reader), at, key))
     }
 
     fn inner(&self) -> SdbResult<StratoInner<'t>> {
-        let key = child(&self.reader, self.key, "inner", &self.base)?;
-        Ok(SRef::open(Arc::clone(&self.reader), self.base.child_name("inner"), key))
+        let at = self.base.child_name("inner");
+        let key = self
+            .reader
+            .child_cached(self.key, &Segment::Name(String::from("inner")), &at)?
+            .ok_or_else(|| SdbError::PathNotFound(at.clone()))?;
+
+        Ok(SRef::open(Arc::clone(&self.reader), at, key))
     }
 }
 
@@ -179,8 +195,13 @@ impl<'t> StratoSampleMut<'t> {
     }
 
     fn inner_mut(&self) -> SdbResult<StratoInnerMut<'t>> {
-        let key = child(&self.writer, self.key, "inner", &self.base)?;
-        Ok(SMut::open(Arc::clone(&self.writer), self.base.child_name("inner"), key))
+        let at = self.base.child_name("inner");
+        let key = self
+            .writer
+            .child_cached(self.key, &Segment::Name(String::from("inner")), &at)?
+            .ok_or_else(|| SdbError::PathNotFound(at.clone()))?;
+
+        Ok(SMut::open(Arc::clone(&self.writer), at, key))
     }
 }
 
@@ -202,13 +223,6 @@ impl<'t> SIdentifiable for StratoSampleMut<'t> {
     fn path(&self) -> &SPath {
         &self.base
     }
-}
-
-/// Resolves an object field's primary key (the navigation a generated getter does).
-fn child<'r, 't: 'r, R: Reader + 't>(reader: &'r R, parent: Skey, name: &str, base: &SPath) -> SdbResult<Skey> {
-    reader
-        .child(parent, &Segment::Name(name.to_string()))?
-        .ok_or_else(|| stratodb::SdbError::PathNotFound(base.child_name(name)))
 }
 
 #[test]
@@ -283,4 +297,58 @@ fn fetch_mut_exposes_pk() {
     }
 
     w.commit().unwrap();
+}
+
+/// Child navigation is memoized through the shared path cache (redesign step 3),
+/// so it must stay coherent: repeated hops return the same key, and a newer
+/// generation never serves an older snapshot's cached child — nor the reverse.
+#[test]
+fn accessor_navigation_is_generation_coherent() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = StratoDb::create(dir.path().join("typed_gen.stratodb")).unwrap();
+    let table = db.open_table("data").unwrap();
+
+    let w = table.write().unwrap();
+    w.store(
+        "a/h",
+        &Sample {
+            x:     1,
+            inner: Inner {
+                y: 2
+            },
+        },
+    )
+    .unwrap();
+    w.commit().unwrap();
+
+    // On the first snapshot, navigating to `inner` twice is a cache hit the
+    // second time and must yield the same stable key.
+    let r1 = table.read().unwrap();
+    let acc1 = r1.fetch::<StratoSample>("a/h").unwrap();
+    let inner_key = acc1.inner().unwrap().key();
+    assert_eq!(acc1.inner().unwrap().key(), inner_key);
+
+    // Overwrite the whole subtree (which mints fresh keys) and bump the generation.
+    let w = table.write().unwrap();
+    w.store(
+        "a/h",
+        &Sample {
+            x:     9,
+            inner: Inner {
+                y: 8
+            },
+        },
+    )
+    .unwrap();
+    w.commit().unwrap();
+
+    // A fresh reader navigates to the new node, never the cached old key.
+    let r2 = table.read().unwrap();
+    let acc2 = r2.fetch::<StratoSample>("a/h").unwrap();
+    assert_ne!(acc2.inner().unwrap().key(), inner_key);
+    assert_eq!(acc2.inner().unwrap().y().unwrap().get().unwrap(), 8);
+
+    // The older snapshot still navigates to its own key and value.
+    assert_eq!(acc1.inner().unwrap().key(), inner_key);
+    assert_eq!(acc1.inner().unwrap().y().unwrap().get().unwrap(), 2);
 }
