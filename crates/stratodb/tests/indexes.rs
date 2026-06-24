@@ -130,6 +130,7 @@ fn index_tracks_store_update_and_remove() {
         .unwrap()
         .find::<BTreeMap<String, i32>>("by_age", &[Scalar::I32(40)])
         .unwrap();
+
     assert_eq!(found, vec![BTreeMap::from([(String::from("age"), 40)])]);
     assert_eq!(count_at(&db, "users", "by_age", 30), 2);
 
@@ -143,6 +144,7 @@ fn index_tracks_store_update_and_remove() {
     // Removing an entity drops its entry.
     let w = users.write().unwrap();
     assert!(w.remove("users/bob").unwrap());
+
     w.commit().unwrap();
     assert_eq!(count_at(&db, "users", "by_age", 30), 0);
     assert_eq!(count_at(&db, "users", "by_age", 40), 2);
@@ -163,6 +165,7 @@ fn find_rejects_unknown_index_and_wrong_arity() {
     let arity = r
         .find::<BTreeMap<String, i32>>("by_age", &[Scalar::I32(1), Scalar::I32(2)])
         .unwrap_err();
+
     assert!(matches!(arity, SdbError::IndexArity { .. }), "got {arity:?}");
 }
 
@@ -190,12 +193,13 @@ fn storing_a_whole_subtree_indexes_every_child() {
         .unwrap()
         .clear()
         .unwrap();
+
     w.commit().unwrap();
     assert_eq!(count_at(&db, "users", "by_age", 30), 0);
 }
 
 #[test]
-fn composite_index_matches_on_every_column() {
+fn composite_index_supports_exact_and_prefix_match() {
     let dir = tempfile::tempdir().unwrap();
     let db = StratoDb::create(dir.path().join("e2e_composite.stratodb")).unwrap();
     let users = db.open_table("users").unwrap();
@@ -210,6 +214,7 @@ fn composite_index_matches_on_every_column() {
         ],
         false,
     );
+
     users.create_index(&idx).unwrap();
 
     let w = users.write().unwrap();
@@ -225,16 +230,19 @@ fn composite_index_matches_on_every_column() {
     let xs = r
         .find::<BTreeMap<String, i32>>("by_a_b", &[Scalar::I32(1), Scalar::I32(5)])
         .unwrap();
+
     assert_eq!(
         xs,
         vec![BTreeMap::from([(String::from("a"), 1), (String::from("b"), 5)])]
     );
+
     assert_eq!(
         r.find::<BTreeMap<String, i32>>("by_a_b", &[Scalar::I32(1), Scalar::I32(9)])
             .unwrap()
             .len(),
         1
     );
+
     assert_eq!(
         r.find::<BTreeMap<String, i32>>("by_a_b", &[Scalar::I32(2), Scalar::I32(9)])
             .unwrap()
@@ -242,10 +250,19 @@ fn composite_index_matches_on_every_column() {
         0
     );
 
-    // A partial key is rejected — exact match needs every column.
+    // A leading-column prefix matches every entity with that `a` (any `b`).
+    assert_eq!(
+        r.find::<BTreeMap<String, i32>>("by_a_b", &[Scalar::I32(1)])
+            .unwrap()
+            .len(),
+        2
+    );
+
+    // More values than the index has columns is still an error.
     let arity = r
-        .find::<BTreeMap<String, i32>>("by_a_b", &[Scalar::I32(1)])
+        .find::<BTreeMap<String, i32>>("by_a_b", &[Scalar::I32(1), Scalar::I32(5), Scalar::I32(9)])
         .unwrap_err();
+
     assert!(matches!(arity, SdbError::IndexArity { .. }), "got {arity:?}");
 }
 
@@ -266,16 +283,50 @@ fn unique_index_keeps_the_entity_in_the_value() {
         r.find::<BTreeMap<String, i32>>("uby_age", &[Scalar::I32(30)]).unwrap(),
         vec![BTreeMap::from([(String::from("age"), 30)])]
     );
+
     assert_eq!(
         r.find::<BTreeMap<String, i32>>("uby_age", &[Scalar::I32(40)])
             .unwrap()
             .len(),
         1
     );
+
     assert_eq!(
         r.find::<BTreeMap<String, i32>>("uby_age", &[Scalar::I32(99)])
             .unwrap()
             .len(),
         0
     );
+}
+
+#[test]
+fn query_builder_does_prefix_reverse_and_full_scans() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = StratoDb::create(dir.path().join("e2e_query.stratodb")).unwrap();
+    let users = db.open_table("users").unwrap();
+    users.create_index(&single("by_age", "age", false)).unwrap();
+
+    let w = users.write().unwrap();
+    for (name, age) in [("alice", 30), ("bob", 20), ("carol", 30), ("dave", 40)] {
+        w.put(&format!("users/{name}/age"), &age).unwrap();
+    }
+    w.commit().unwrap();
+
+    let r = users.read().unwrap();
+    let ages = |hits: Vec<BTreeMap<String, i32>>| hits.into_iter().map(|m| m["age"]).collect::<Vec<_>>();
+
+    // Empty prefix = every indexed entity, in ascending index (age) order.
+    assert_eq!(ages(r.query("by_age").run().unwrap()), vec![20, 30, 30, 40]);
+
+    // Reverse = descending index order.
+    assert_eq!(ages(r.query("by_age").reversed().run().unwrap()), vec![40, 30, 30, 20]);
+
+    // A prefix narrows to one value (single column); two entities are 30.
+    assert_eq!(
+        ages(r.query("by_age").prefixed(&[Scalar::I32(30)]).run().unwrap()),
+        vec![30, 30]
+    );
+
+    // `find` is the ascending exact/prefix shortcut.
+    assert_eq!(ages(r.find("by_age", &[Scalar::I32(40)]).unwrap()), vec![40]);
 }

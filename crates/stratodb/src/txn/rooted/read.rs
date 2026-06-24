@@ -1,4 +1,4 @@
-use super::super::ReadTxn;
+use super::super::{IndexQuery, ReadTxn};
 use crate::{
     data::{refs::SRef, SData, SValue, Scalar},
     error::SdbResult,
@@ -63,14 +63,19 @@ impl<'a> RootedRead<'a> {
         self.txn.load_at(&self.abs(path)?)
     }
 
-    /// Finds the entities an index points at for an exact match on `values`,
-    /// keeping only those at or under this view's root, each recomposed as a `T`.
+    /// Starts an [`IndexQuery`] scoped to this view's root: only entities at or
+    /// under the root are kept. See [`ReadTxn::query`](super::ReadTxn::query).
+    pub fn query(&self, index: &str) -> IndexQuery<'a> {
+        self.txn.query(index).under(self.root.clone())
+    }
+
+    /// Finds the entities an index points at, keeping only those at or under this
+    /// view's root, each recomposed as a `T`.
     ///
-    /// Same exact-match semantics as [`ReadTxn::find`](super::ReadTxn::find), but
-    /// scoped: the index is table-global, and this filters its matches to the ones
-    /// living within the view's root subtree (the root itself counts).
+    /// Like [`ReadTxn::find`](super::ReadTxn::find) but scoped to the view (the
+    /// root itself counts); the index is table-global, this filters its matches.
     pub fn find<T: SData>(&self, index: &str, values: &[Scalar]) -> SdbResult<Vec<T>> {
-        self.txn.find_under(index, values, &self.root)
+        self.query(index).prefixed(values).run()
     }
 
     fn abs(&self, path: &str) -> SdbResult<SPath> {

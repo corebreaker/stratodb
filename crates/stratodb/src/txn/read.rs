@@ -1,6 +1,6 @@
 //! Opaque read transaction.
 
-use super::rooted::RootedRead;
+use super::{query::IndexQuery, rooted::RootedRead};
 use crate::{
     access::{ReadCursor, Reader, Rooted},
     cache::PathCache,
@@ -78,8 +78,8 @@ impl ReadTxn {
     ///
     /// Every path passed to the returned [`RootedRead`] resolves as `root` then
     /// the path, so `txn.rooted(SPath::parse("users/alice")?).get("age")` reads
-    /// `users/alice/age`. The view borrows the transaction. Index queries
-    /// (`find`) are not re-rooted — indexes are defined over the whole table.
+    /// `users/alice/age`. The view borrows the transaction. An index query on the
+    /// view is scoped to entities at or under `root` (see [`RootedRead::find`]).
     pub fn rooted(&self, root: SPath) -> RootedRead<'_> {
         RootedRead::new(self, root)
     }
@@ -114,24 +114,36 @@ impl ReadTxn {
         T::load(&ReadCursor::new(self), base)
     }
 
-    /// Finds the entities an index points at for an exact match on `values`,
-    /// recomposing each as a `T`.
+    /// Finds the entities an index points at, recomposing each as a `T`.
     ///
-    /// `values` gives one scalar per index column, in the index's column order —
-    /// the full key, so this is an exact (equality) lookup on every column. The
-    /// results are returned in index order (ascending by the encoded key, honoring
-    /// each column's direction). Errors with [`SdbError::IndexNotFound`] for an
-    /// unknown index and [`SdbError::IndexArity`] for the wrong number of values.
+    /// `values` are matched against the index's leading columns (in column order):
+    /// the full set is an exact lookup, fewer is a prefix lookup (every entity
+    /// whose leading columns match), and an empty slice matches every indexed
+    /// entity. Results come back in index order (ascending by the encoded key,
+    /// honoring each column's ASC/DESC). For reverse order, prefix bounds, or a
+    /// subtree scope, use [`query`](Self::query). Errors with
+    /// [`SdbError::IndexNotFound`] for an unknown index and [`SdbError::IndexArity`]
+    /// when given more values than the index has columns.
     pub fn find<T: SData>(&self, index: &str, values: &[Scalar]) -> SdbResult<Vec<T>> {
-        self.find_under(index, values, &SPath::root())
+        self.query(index).prefixed(values).run()
     }
 
-    /// Like [`find`](Self::find) but keeps only the matches at or under `root`.
-    /// A root-path (empty `root`) imposes no restriction, so `find` is this with
-    /// the table root. Scoping intersects the index's value matches with the
-    /// pattern's entities under `root` (the latter walked only to entity nodes, not
-    /// whole subtrees); it backs [`RootedRead::find`](super::RootedRead::find).
-    pub(crate) fn find_under<T: SData>(&self, index: &str, values: &[Scalar], root: &SPath) -> SdbResult<Vec<T>> {
+    /// Starts an [`IndexQuery`] against `index` — a builder for prefix matches,
+    /// reverse order, and subtree scoping. See [`find`](Self::find) for the common
+    /// exact/forward case.
+    pub fn query(&self, index: &str) -> IndexQuery<'_> {
+        IndexQuery::new(self, index)
+    }
+
+    /// Runs a built index query: prefix scan (exact = full prefix), optional
+    /// subtree scoping, optional reversal, then recomposes each hit as a `T`.
+    pub(crate) fn execute_query<T: SData>(
+        &self,
+        index: &str,
+        prefix: &[Scalar],
+        reverse: bool,
+        root: &SPath,
+    ) -> SdbResult<Vec<T>> {
         let entry = {
             let meta = self.txn.open_table(engine::META_TABLE)?;
 
@@ -142,26 +154,25 @@ impl ReadTxn {
         })?;
 
         let def = entry.def();
-        if values.len() != def.columns().len() {
+        if prefix.len() > def.columns().len() {
             return Err(SdbError::IndexArity {
                 index:    index.to_string(),
                 expected: def.columns().len(),
-                got:      values.len(),
+                got:      prefix.len(),
             });
         }
 
         let id = entry.id();
-        let cols = def.encode_columns(values);
+
+        // `encode_columns` zips with the columns, so a short `prefix` encodes only
+        // its leading columns — exactly the byte prefix a prefix scan needs.
+        let cols = def.encode_columns(prefix);
 
         let Some(table) = self.open()? else {
             return Ok(Vec::new());
         };
 
-        let mut entities = if def.unique() {
-            unique_match(&table, id, cols)?
-        } else {
-            duplicate_matches(&table, id, cols)?
-        };
+        let mut entities = scan_prefix(&table, id, &cols, def.unique())?;
 
         // Restrict to entities at or under `root`. An entity is in scope only if
         // the pattern reaches at least the root's depth; when it does,
@@ -175,6 +186,12 @@ impl ReadTxn {
 
             let under: HashSet<Skey> = pattern.affected_entities(&table, root)?.into_iter().collect();
             entities.retain(|entity| under.contains(entity));
+        }
+
+        // The scan yields ascending index order; reverse the materialized hits for
+        // descending order (the whole result set is loaded either way).
+        if reverse {
+            entities.reverse();
         }
 
         // Each match is addressed by its (stable) key; re-root a reader there so
@@ -298,46 +315,46 @@ impl ReadTxn {
     }
 }
 
-/// The single entity a unique index stores for `cols` (in the entry's value), or
-/// none if there is no such entry.
-fn unique_match(table: &ReadOnlyTable<TableKey, TableValue>, id: IndexId, cols: Vec<u8>) -> SdbResult<Vec<Skey>> {
-    let key = TableKey::Index {
+/// Collects every entity whose index entry's columns start with `prefix`, in
+/// ascending key order.
+///
+/// Seeks to the first entry for `id` at or after `prefix`, then walks forward
+/// until an entry no longer matches (different index, or columns diverging from
+/// `prefix`) and stops — so an exact lookup is just the full-length prefix. The
+/// matched entity lives in the key for a non-unique index and in the value for a
+/// unique one; the seek's lower bound is tagged accordingly.
+fn scan_prefix(
+    table: &ReadOnlyTable<TableKey, TableValue>,
+    id: IndexId,
+    prefix: &[u8],
+    unique: bool,
+) -> SdbResult<Vec<Skey>> {
+    let lower = TableKey::Index {
         id,
-        cols,
-        entity: None,
-    };
-
-    match table.get(&key)? {
-        Some(guard) => match guard.value() {
-            TableValue::Skey(entity) => Ok(vec![entity]),
-            _ => Err(SdbError::Corrupt("unique index entry without an entity key".into())),
-        },
-        None => Ok(Vec::new()),
-    }
-}
-
-/// Every entity a non-unique index stores for `cols` (each in its entry's key,
-/// after the columns). Scans the `[cols·min_entity, cols·max_entity]` key range.
-fn duplicate_matches(table: &ReadOnlyTable<TableKey, TableValue>, id: IndexId, cols: Vec<u8>) -> SdbResult<Vec<Skey>> {
-    let low = TableKey::Index {
-        id,
-        cols: cols.clone(),
-        entity: Some(Skey::from_bytes([0x00; 16])),
-    };
-    let high = TableKey::Index {
-        id,
-        cols,
-        entity: Some(Skey::from_bytes([0xFF; 16])),
+        cols: prefix.to_vec(),
+        entity: (!unique).then(|| Skey::from_bytes([0x00; 16])),
     };
 
     let mut entities = Vec::new();
-    for item in table.range(low..=high)? {
-        let (key, _) = item?;
-        if let TableKey::Index {
-            entity: Some(entity), ..
-        } = key.value()
-        {
-            entities.push(entity);
+    for item in table.range(lower..)? {
+        let (key, value) = item?;
+        match key.value() {
+            TableKey::Index {
+                id: entry_id,
+                cols,
+                entity,
+            } if entry_id == id && cols.starts_with(prefix) => {
+                let entity = match entity {
+                    Some(entity) => entity,
+                    None => match value.value() {
+                        TableValue::Skey(entity) => entity,
+                        _ => return Err(SdbError::Corrupt("unique index entry without an entity key".into())),
+                    },
+                };
+
+                entities.push(entity);
+            }
+            _ => break,
         }
     }
 

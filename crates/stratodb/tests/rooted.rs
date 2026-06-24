@@ -182,3 +182,38 @@ fn rooted_find_scopes_to_the_subtree() {
     assert_eq!(count(r.rooted(root("org/eng/members/alice/age"))), 0);
     assert_eq!(count(r.rooted(root("org/eng/members/bob"))), 0);
 }
+
+#[test]
+fn rooted_query_builder_scopes_and_reverses() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = StratoDb::create(dir.path().join("rq.stratodb")).unwrap();
+    let org = db.open_table("org").unwrap();
+
+    org.create_index(&IndexDef::new(
+        String::from("by_age"),
+        String::from("org/*/members/*"),
+        vec![IndexColumn::asc(root("age"))],
+        false,
+    ))
+    .unwrap();
+
+    let w = org.write().unwrap();
+    w.put("org/eng/members/alice/age", &30i32).unwrap();
+    w.put("org/eng/members/bob/age", &40i32).unwrap();
+    w.put("org/sales/members/carol/age", &30i32).unwrap();
+    w.commit().unwrap();
+
+    let r = org.read().unwrap();
+    let ages = |hits: Vec<BTreeMap<String, i32>>| hits.into_iter().map(|m| m["age"]).collect::<Vec<_>>();
+    let eng = r.rooted(root("org/eng"));
+
+    // The view's query builder is scoped to the root: only eng members, and
+    // `reverse` flips the index order (descending by age).
+    assert_eq!(ages(eng.query("by_age").reversed().run().unwrap()), vec![40, 30]);
+
+    // A scoped prefix keeps only eng's age-30 member (sales' carol is excluded).
+    assert_eq!(
+        ages(eng.query("by_age").prefixed(&[Scalar::I32(30)]).run().unwrap()),
+        vec![30]
+    );
+}
