@@ -13,7 +13,11 @@ redb = "4.1"
 thiserror = "2.0"
 uuid = { version = "1.23", features = ["v7"] }
 
-stratodb-derive = { workspace = true }
+stratodb-derive = { workspace = true, optional = true }
 
 [dev-dependencies]
 tempfile = "3.27"
+
+[features]
+default = []
+derive = ["dep:stratodb-derive"]

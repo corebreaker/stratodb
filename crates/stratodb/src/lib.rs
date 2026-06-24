@@ -53,3 +53,9 @@ pub use self::{
     node::NodeKind,
     table::Table,
 };
+
+/// Derives [`SData`] for a struct, generating its lazy `StratoXxx` /
+/// `StratoXxxMut` accessors. Shares the `SData` name with the trait (distinct
+/// namespaces), so `use stratodb::SData;` brings both into scope.
+#[cfg(feature = "derive")]
+pub use stratodb_derive::SData;
