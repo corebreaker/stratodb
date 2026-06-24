@@ -7,7 +7,7 @@ use crate::{
     data::{refs::SRef, SData, SValue, Scalar},
     engine::{self, TableKey, TableValue},
     error::{SdbError, SdbResult},
-    index::{registry, IndexId},
+    index::{registry, IndexId, Pattern},
     node::{Node, NodeKind},
     path::{SPath, Segment},
     tree,
@@ -15,7 +15,7 @@ use crate::{
 };
 
 use redb::{ReadOnlyTable, ReadTransaction, TableError};
-use std::sync::Arc;
+use std::{collections::HashSet, sync::Arc};
 
 /// A read-only view of a table at a consistent point in time.
 pub struct ReadTxn {
@@ -123,6 +123,15 @@ impl ReadTxn {
     /// each column's direction). Errors with [`SdbError::IndexNotFound`] for an
     /// unknown index and [`SdbError::IndexArity`] for the wrong number of values.
     pub fn find<T: SData>(&self, index: &str, values: &[Scalar]) -> SdbResult<Vec<T>> {
+        self.find_under(index, values, &SPath::root())
+    }
+
+    /// Like [`find`](Self::find) but keeps only the matches at or under `root`.
+    /// A root-path (empty `root`) imposes no restriction, so `find` is this with
+    /// the table root. Scoping intersects the index's value matches with the
+    /// pattern's entities under `root` (the latter walked only to entity nodes, not
+    /// whole subtrees); it backs [`RootedRead::find`](super::RootedRead::find).
+    pub(crate) fn find_under<T: SData>(&self, index: &str, values: &[Scalar], root: &SPath) -> SdbResult<Vec<T>> {
         let entry = {
             let meta = self.txn.open_table(engine::META_TABLE)?;
 
@@ -148,11 +157,25 @@ impl ReadTxn {
             return Ok(Vec::new());
         };
 
-        let entities = if def.unique() {
+        let mut entities = if def.unique() {
             unique_match(&table, id, cols)?
         } else {
             duplicate_matches(&table, id, cols)?
         };
+
+        // Restrict to entities at or under `root`. An entity is in scope only if
+        // the pattern reaches at least the root's depth; when it does,
+        // `affected_entities(root)` yields exactly the matching entities on (and
+        // therefore under) that root.
+        if !root.is_empty() {
+            let pattern = Pattern::parse(def.pattern())?;
+            if pattern.depth() < root.len() {
+                return Ok(Vec::new());
+            }
+
+            let under: HashSet<Skey> = pattern.affected_entities(&table, root)?.into_iter().collect();
+            entities.retain(|entity| under.contains(entity));
+        }
 
         // Each match is addressed by its (stable) key; re-root a reader there so
         // the path-based loader recomposes the entity from its own subtree.

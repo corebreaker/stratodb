@@ -67,6 +67,13 @@ impl Pattern {
         })
     }
 
+    /// The depth (number of tree levels from the table root) at which this
+    /// pattern's entities sit. An entity can lie at or under a root only if this
+    /// is at least the root's depth.
+    pub(crate) fn depth(&self) -> usize {
+        self.segs.len()
+    }
+
     /// Returns the keys of the entities this pattern matches that lie on the same
     /// root-to-node line as `scope` (the path a mutation touched). The walk is
     /// pruned to that line, so it touches only nodes the mutation could affect.

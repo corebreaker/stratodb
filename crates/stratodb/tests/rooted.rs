@@ -71,6 +71,7 @@ fn rooted_write_is_relative_and_persists() {
 
         assert_eq!(alice.get::<i32>("age").unwrap(), Some(31));
         assert_eq!(alice.get::<i32>("scores/math").unwrap(), Some(90));
+
         // and the same nodes are reachable by absolute path on the transaction.
         assert_eq!(w.get::<i32>("users/alice/age").unwrap(), Some(31));
 
@@ -113,5 +114,71 @@ fn rooted_writes_maintain_indexes() {
         .unwrap()
         .find::<BTreeMap<String, i32>>("by_age", &[Scalar::I32(30)])
         .unwrap();
+
     assert_eq!(found.len(), 2);
+}
+
+#[test]
+fn rooted_find_scopes_to_the_subtree() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = StratoDb::create(dir.path().join("rf.stratodb")).unwrap();
+    let org = db.open_table("org").unwrap();
+
+    org.create_index(&IndexDef::new(
+        String::from("by_age"),
+        String::from("org/*/members/*"),
+        vec![IndexColumn::asc(root("age"))],
+        false,
+    ))
+    .unwrap();
+
+    let w = org.write().unwrap();
+    w.put("org/eng/members/alice/age", &30i32).unwrap();
+    w.put("org/eng/members/bob/age", &40i32).unwrap();
+    w.put("org/sales/members/carol/age", &30i32).unwrap();
+    w.commit().unwrap();
+
+    let r = org.read().unwrap();
+    let count = |v: stratodb::txn::RootedRead<'_>| {
+        v.find::<BTreeMap<String, i32>>("by_age", &[Scalar::I32(30)])
+            .unwrap()
+            .len()
+    };
+
+    // Unrooted: both 30-year-olds across the whole table.
+    assert_eq!(
+        r.find::<BTreeMap<String, i32>>("by_age", &[Scalar::I32(30)])
+            .unwrap()
+            .len(),
+        2,
+    );
+
+    // Rooted at a team: only that team's matching members.
+    assert_eq!(count(r.rooted(root("org/eng"))), 1);
+    assert_eq!(count(r.rooted(root("org/sales"))), 1);
+
+    // Rooted above the teams: all of them; nesting composes the same way.
+    assert_eq!(count(r.rooted(root("org"))), 2);
+    assert_eq!(count(r.rooted(root("org")).rooted(root("eng"))), 1);
+
+    // Rooted at a single entity: that entity when it matches, otherwise none.
+    let alice = r.rooted(root("org/eng/members/alice"));
+    assert_eq!(
+        alice
+            .find::<BTreeMap<String, i32>>("by_age", &[Scalar::I32(30)])
+            .unwrap()
+            .len(),
+        1,
+    );
+    assert_eq!(
+        alice
+            .find::<BTreeMap<String, i32>>("by_age", &[Scalar::I32(40)])
+            .unwrap()
+            .len(),
+        0,
+    );
+
+    // Rooted below the entity depth, or on a non-matching entity: nothing.
+    assert_eq!(count(r.rooted(root("org/eng/members/alice/age"))), 0);
+    assert_eq!(count(r.rooted(root("org/eng/members/bob"))), 0);
 }
