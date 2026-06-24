@@ -33,6 +33,7 @@ mod codec;
 mod datetime;
 mod db;
 mod engine;
+mod index;
 mod key;
 mod node;
 mod table;
