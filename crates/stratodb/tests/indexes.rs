@@ -330,3 +330,69 @@ fn query_builder_does_prefix_reverse_and_full_scans() {
     // `find` is the ascending exact/prefix shortcut.
     assert_eq!(ages(r.find("by_age", &[Scalar::I32(40)]).unwrap()), vec![40]);
 }
+
+#[test]
+fn unique_index_rejects_duplicates() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = StratoDb::create(dir.path().join("e2e_unique_violation.stratodb")).unwrap();
+    let users = db.open_table("users").unwrap();
+    users.create_index(&single("uby_age", "age", true)).unwrap();
+
+    // Seed alice = 30.
+    let w = users.write().unwrap();
+    w.put("users/alice/age", &30i32).unwrap();
+    w.commit().unwrap();
+
+    // A second entity with the same value is rejected, and its write rolls back.
+    let w = users.write().unwrap();
+    let err = w.put("users/bob/age", &30i32).unwrap_err();
+    assert!(matches!(err, SdbError::UniqueViolation { .. }), "got {err:?}");
+    drop(w);
+    assert!(!users.read().unwrap().exists("users/bob").unwrap());
+
+    // A distinct value is fine; later moving it onto a taken value is rejected.
+    let w = users.write().unwrap();
+    w.put("users/bob/age", &40i32).unwrap();
+    w.commit().unwrap();
+
+    let w = users.write().unwrap();
+    assert!(matches!(
+        w.put("users/bob/age", &30i32).unwrap_err(),
+        SdbError::UniqueViolation { .. }
+    ));
+    drop(w);
+
+    // Re-storing an entity's own value is not a self-violation.
+    let w = users.write().unwrap();
+    w.put("users/alice/age", &30i32).unwrap();
+    w.commit().unwrap();
+
+    // A bulk store carrying an in-batch duplicate is rejected too.
+    let dups: BTreeMap<String, BTreeMap<String, i32>> = BTreeMap::from([
+        (String::from("x"), BTreeMap::from([(String::from("age"), 7)])),
+        (String::from("y"), BTreeMap::from([(String::from("age"), 7)])),
+    ]);
+
+    let w = users.write().unwrap();
+    assert!(matches!(
+        w.store("users", &dups).unwrap_err(),
+        SdbError::UniqueViolation { .. }
+    ));
+    drop(w);
+
+    // Final committed state is exactly alice = 30 and bob = 40.
+    let r = users.read().unwrap();
+    assert_eq!(
+        r.find::<BTreeMap<String, i32>>("uby_age", &[Scalar::I32(30)])
+            .unwrap()
+            .len(),
+        1
+    );
+
+    assert_eq!(
+        r.find::<BTreeMap<String, i32>>("uby_age", &[Scalar::I32(40)])
+            .unwrap()
+            .len(),
+        1
+    );
+}

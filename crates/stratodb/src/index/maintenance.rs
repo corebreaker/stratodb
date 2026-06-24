@@ -16,7 +16,7 @@ use super::{definitions::IndexDef, pattern::Pattern, registry::IndexEntry, Index
 use crate::{
     data::Scalar,
     engine::{TableKey, TableValue},
-    error::SdbResult,
+    error::{SdbError, SdbResult},
     path::SPath,
     tree,
     Skey,
@@ -40,12 +40,38 @@ pub(crate) fn delete(data: &mut DataTable<'_>, indexes: &[IndexEntry], scope: &S
 }
 
 /// Inserts the index entries the affected entities now imply. Call after applying
-/// a mutation at `scope`.
+/// a mutation at `scope`. A unique index rejects an entry whose key already maps
+/// to a different entity with [`SdbError::UniqueViolation`].
 pub(crate) fn insert(data: &mut DataTable<'_>, indexes: &[IndexEntry], scope: &SPath) -> SdbResult<()> {
     for entry in indexes {
+        let unique = entry.def().unique();
         for (key, value) in entries_for(&*data, entry, scope)? {
+            if unique {
+                guard_unique(data, &key, &value, entry.def().name())?;
+            }
+
             data.insert(&key, &value)?;
         }
+    }
+
+    Ok(())
+}
+
+/// Fails with [`SdbError::UniqueViolation`] if `key` already maps to an entity
+/// other than the one in `value`. Re-inserting an entity's own entry is fine —
+/// `delete` removes it first — so this fires only on a genuine collision (a
+/// second entity, or a batch with a repeated value).
+fn guard_unique(data: &DataTable<'_>, key: &TableKey, value: &TableValue, index: &str) -> SdbResult<()> {
+    let TableValue::Skey(entity) = value else {
+        return Ok(());
+    };
+
+    if let Some(existing) = data.get(key)?
+        && matches!(existing.value(), TableValue::Skey(other) if other != *entity)
+    {
+        return Err(SdbError::UniqueViolation {
+            index: index.to_string(),
+        });
     }
 
     Ok(())
