@@ -33,7 +33,6 @@ mod codec;
 mod datetime;
 mod db;
 mod engine;
-mod index;
 mod key;
 mod node;
 mod table;
@@ -43,6 +42,7 @@ pub mod access;
 pub mod constants;
 pub mod data;
 pub mod error;
+pub mod index;
 pub mod path;
 pub mod txn;
 

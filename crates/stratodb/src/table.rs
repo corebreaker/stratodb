@@ -3,7 +3,9 @@
 use crate::{
     cache::PathCache,
     db::DbInner,
+    engine::META_TABLE,
     error::{SdbError, SdbResult},
+    index::{registry, IndexDef},
     txn::{ReadTxn, WriteTxn},
 };
 
@@ -66,5 +68,30 @@ impl Table {
         let txn = self.inner.db.begin_write()?;
 
         Ok(WriteTxn::new(txn, self.name.clone(), Arc::clone(&self.inner)))
+    }
+
+    /// Registers a secondary index on this table.
+    ///
+    /// Idempotent for an identical definition; errors with
+    /// [`SchemaMismatch`](crate::SdbError::SchemaMismatch) if `def.name` already
+    /// names a different index here. The index is registered only — write-time
+    /// maintenance and queries arrive in later milestone-3 steps.
+    pub fn create_index(&self, def: &IndexDef) -> SdbResult<()> {
+        let txn = self.inner.db.begin_write()?;
+        {
+            let mut meta = txn.open_table(META_TABLE)?;
+            registry::create(&mut meta, &self.name, def)?;
+        }
+        txn.commit()?;
+
+        Ok(())
+    }
+
+    /// Returns the definition of the named index on this table, if it exists.
+    pub fn index_def(&self, name: &str) -> SdbResult<Option<IndexDef>> {
+        let txn = self.inner.db.begin_read()?;
+        let meta = txn.open_table(META_TABLE)?;
+
+        Ok(registry::lookup(&meta, &self.name, name)?.map(|entry| entry.into_def()))
     }
 }

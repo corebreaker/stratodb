@@ -16,6 +16,7 @@ mod table_key;
 mod table_value;
 
 pub(crate) use self::{
+    table_defs::META_TABLE,
     table_key::TableKey,
     table_value::TableValue,
     functions::{bootstrap_metadata, data_def},
