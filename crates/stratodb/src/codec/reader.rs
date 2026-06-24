@@ -1,24 +1,4 @@
-//! Low-level byte (de)serialization helpers shared by the internal codecs.
-//!
-//! Multi-byte integers are written big-endian so that fixed-width encodings are
-//! directly byte-comparable. Variable-length byte runs are length-prefixed so
-//! that the encoders are self-delimiting.
-
 use crate::error::{SdbError, SdbResult};
-
-pub(crate) fn put_u32(buf: &mut Vec<u8>, v: u32) {
-    buf.extend_from_slice(&v.to_be_bytes());
-}
-
-pub(crate) fn put_u64(buf: &mut Vec<u8>, v: u64) {
-    buf.extend_from_slice(&v.to_be_bytes());
-}
-
-/// Writes a length-prefixed (u32 big-endian) byte run.
-pub(crate) fn put_bytes(buf: &mut Vec<u8>, bytes: &[u8]) {
-    put_u32(buf, bytes.len() as u32);
-    buf.extend_from_slice(bytes);
-}
 
 /// A forward-only cursor over a byte buffer used during decoding.
 pub(crate) struct Reader<'a> {
@@ -66,12 +46,14 @@ impl<'a> Reader<'a> {
         Ok(self.take(N)?.try_into().unwrap())
     }
 
-    /// Reads a length-prefixed byte run written by [`put_bytes`].
+    /// Reads a length-prefixed byte run written by [`super::put_bytes`].
     pub(crate) fn bytes(&mut self) -> SdbResult<&'a [u8]> {
         let n = self.u32()? as usize;
         self.take(n)
     }
 
+    /// Whether every byte has been consumed (used by round-trip tests).
+    #[cfg(test)]
     pub(crate) fn is_empty(&self) -> bool {
         self.pos >= self.buf.len()
     }

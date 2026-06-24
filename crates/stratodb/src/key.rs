@@ -12,6 +12,10 @@ use std::fmt::{Debug, Display, Formatter, Result as FmtResult};
 pub struct Skey(Uuid);
 
 impl Skey {
+    /// The fixed primary key of a table's root node; path resolution walks from
+    /// here. The nil UUID is distinct from any generated v7 key.
+    pub(crate) const ROOT: Skey = Skey(Uuid::nil());
+
     /// Generates a fresh, time-ordered key.
     pub(crate) fn generate() -> Self {
         Self(Uuid::now_v7())

@@ -150,6 +150,18 @@ impl WriteTxn {
         tree::put_scalar(&mut table, path, scalar)
     }
 
+    pub(crate) fn ensure_container_at(&self, path: &SPath, list: bool) -> SdbResult<Skey> {
+        let mut table = self.txn.open_table(engine::data_def(&self.table))?;
+
+        tree::ensure_container(&mut table, path, list)
+    }
+
+    pub(crate) fn list_move_at(&self, list_key: Skey, from: usize, to: usize) -> SdbResult<()> {
+        let mut table = self.txn.open_table(engine::data_def(&self.table))?;
+
+        tree::list_move(&mut table, list_key, from, to)
+    }
+
     pub(crate) fn remove_path_at(&self, path: &SPath) -> SdbResult<bool> {
         let mut table = self.txn.open_table(engine::data_def(&self.table))?;
 

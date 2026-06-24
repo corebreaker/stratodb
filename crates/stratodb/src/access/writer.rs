@@ -17,6 +17,15 @@ pub trait Writer: Reader {
 
     /// Removes the subtree at `path`, returning whether anything was removed.
     fn remove(&self, path: &SPath) -> SdbResult<bool>;
+
+    /// Ensures a container node exists at `path` (a list when `list`, otherwise an
+    /// object), creating ancestors as needed, and returns its key. Used so that
+    /// empty containers still have an addressable node.
+    fn ensure_container(&self, path: &SPath, list: bool) -> SdbResult<Skey>;
+
+    /// Moves a list element from `from` to `to` within list node `list_key`,
+    /// reordering positions without touching the moved subtree (keys are stable).
+    fn list_move(&self, list_key: Skey, from: usize, to: usize) -> SdbResult<()>;
 }
 
 impl Reader for Box<dyn Writer + '_> {
@@ -68,6 +77,18 @@ impl Writer for Box<dyn Writer + '_> {
         let this = Box::as_ref(self);
 
         this.remove(path)
+    }
+
+    fn ensure_container(&self, path: &SPath, list: bool) -> SdbResult<Skey> {
+        let this = Box::as_ref(self);
+
+        this.ensure_container(path, list)
+    }
+
+    fn list_move(&self, list_key: Skey, from: usize, to: usize) -> SdbResult<()> {
+        let this = Box::as_ref(self);
+
+        this.list_move(list_key, from, to)
     }
 }
 
@@ -121,6 +142,18 @@ impl Writer for Arc<dyn Writer + '_> {
 
         this.remove(path)
     }
+
+    fn ensure_container(&self, path: &SPath, list: bool) -> SdbResult<Skey> {
+        let this = Arc::as_ref(self);
+
+        this.ensure_container(path, list)
+    }
+
+    fn list_move(&self, list_key: Skey, from: usize, to: usize) -> SdbResult<()> {
+        let this = Arc::as_ref(self);
+
+        this.list_move(list_key, from, to)
+    }
 }
 
 /// A copyable read/write cursor bound to a write transaction.
@@ -170,5 +203,13 @@ impl Writer for WriteCursor<'_> {
 
     fn remove(&self, path: &SPath) -> SdbResult<bool> {
         self.txn.remove_path_at(path)
+    }
+
+    fn ensure_container(&self, path: &SPath, list: bool) -> SdbResult<Skey> {
+        self.txn.ensure_container_at(path, list)
+    }
+
+    fn list_move(&self, list_key: Skey, from: usize, to: usize) -> SdbResult<()> {
+        self.txn.list_move_at(list_key, from, to)
     }
 }

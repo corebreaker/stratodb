@@ -13,12 +13,12 @@ use crate::{
 /// maps implement it too, so decomposition is uniform: every field is stored and
 /// loaded through this same trait.
 pub trait SData: Sized {
-    /// Read accessor produced by `ReadTxn::fetch` (a `StratoXXX` or [`super::Leaf`]).
-    type Ref<'t>: SRef<'t>;
-
     /// Write accessor produced by `WriteTxn::fetch_mut` (a `StratoXXXMut` or
     /// [`super::LeafMut`]).
     type Mut<'t>: SMut<'t>;
+
+    /// Read accessor produced by `ReadTxn::fetch` (a `StratoXXX` or [`super::Leaf`]).
+    type Ref<'t>: SRef<'t>;
 
     /// Decomposes `self` into the subtree rooted at `at`.
     fn store<W: Writer>(&self, writer: &W, at: &SPath) -> SdbResult<()>;

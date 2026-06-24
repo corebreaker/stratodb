@@ -2,19 +2,12 @@
 //!
 //! A path is a sequence of [`Segment`]s. Object fields are named (`a/b`); list
 //! elements are indexed (`a/t[5]`). Indices bind to the preceding name without a
-//! separator, so `a/t[5]/x` parses as `a`, `t`, `[5]`, `x`.
+//! separator, so `a/t[5]/x` parses as `a`, `t`, `[5]`, `x`. A path is resolved by
+//! walking the node tree (see [`crate::tree`]); it is never persisted, so it has
+//! no byte encoding.
 
-use crate::{
-    codec::{self, Reader},
-    error::{SdbError, SdbResult},
-};
-
+use crate::error::{SdbError, SdbResult};
 use std::{fmt, str::FromStr};
-
-mod tag {
-    pub(super) const NAME: u8 = 0;
-    pub(super) const INDEX: u8 = 1;
-}
 
 /// One component of an [`SPath`].
 #[derive(Clone, PartialEq, Eq, Hash, Debug)]
@@ -113,45 +106,6 @@ impl SPath {
                 },
                 last,
             )
-        })
-    }
-
-    /// Appends the deterministic, self-delimiting key encoding of this path.
-    pub(crate) fn encode(&self, buf: &mut Vec<u8>) {
-        for segment in &self.segments {
-            match segment {
-                Segment::Name(name) => {
-                    buf.push(tag::NAME);
-                    codec::put_bytes(buf, name.as_bytes());
-                }
-                Segment::Index(index) => {
-                    buf.push(tag::INDEX);
-                    codec::put_u64(buf, *index);
-                }
-            }
-        }
-    }
-
-    /// Decodes a path previously written by [`SPath::encode`].
-    pub(crate) fn decode(r: &mut Reader<'_>) -> SdbResult<SPath> {
-        let mut segments = Vec::new();
-        while !r.is_empty() {
-            match r.u8()? {
-                tag::NAME => {
-                    let bytes = r.bytes()?;
-                    let name = std::str::from_utf8(bytes)
-                        .map_err(|_| SdbError::Corrupt("invalid utf-8 in path segment".into()))?;
-                    segments.push(Segment::Name(name.to_string()));
-                }
-                tag::INDEX => segments.push(Segment::Index(r.u64()?)),
-                other => {
-                    return Err(SdbError::Corrupt(format!("unknown path segment tag {other}")));
-                }
-            }
-        }
-
-        Ok(SPath {
-            segments,
         })
     }
 }
@@ -303,16 +257,5 @@ mod tests {
     fn rejects_empty_segments() {
         assert!(SPath::parse("a//b").is_err());
         assert!(SPath::parse("/a").is_err());
-    }
-
-    #[test]
-    fn key_encoding_roundtrips() {
-        let p = SPath::parse("a/t[5]/x").unwrap();
-
-        let mut buf = Vec::new();
-        p.encode(&mut buf);
-
-        let mut r = Reader::new(&buf);
-        assert_eq!(SPath::decode(&mut r).unwrap(), p);
     }
 }
