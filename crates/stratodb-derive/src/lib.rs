@@ -20,6 +20,7 @@
 //! generating an [`SIndexed`](../stratodb/index/trait.SIndexed.html) impl (see
 //! [`index_attr`]).
 
+mod attr;
 mod desc;
 mod enum_data;
 mod expand_macro;

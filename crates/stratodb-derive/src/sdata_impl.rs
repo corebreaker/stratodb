@@ -17,10 +17,28 @@ pub(crate) fn sdata_impl(name: &Ident, ref_name: &Ident, mut_name: &Ident, parts
     let load_fields = parts.iter().map(|p| {
         let getter = p.getter();
         let ty = p.ty();
-        let field = &p.name();
+        let field = p.name();
+        let aliases = p.aliases();
 
-        quote! {
-            #getter: <#ty as ::stratodb::data::SData>::load(reader, &at.child_name(#field))?,
+        if aliases.is_empty() {
+            quote! {
+                #getter: <#ty as ::stratodb::data::SData>::load(reader, &at.child_name(#field))?,
+            }
+        } else {
+            // Load from the primary name, or the first alias that resolves.
+            quote! {
+                #getter: {
+                    let mut chosen: &str = #field;
+                    for candidate in [#field, #(#aliases),*] {
+                        if ::stratodb::access::Reader::resolve(reader, &at.child_name(candidate))?.is_some() {
+                            chosen = candidate;
+                            break;
+                        }
+                    }
+
+                    <#ty as ::stratodb::data::SData>::load(reader, &at.child_name(chosen))?
+                },
+            }
         }
     });
 

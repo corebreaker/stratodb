@@ -11,16 +11,7 @@
 //! `desc` direction; columns are listed in priority order.
 
 use super::{item::Item, ColumnSpec};
-use syn::{
-    parse::{Parse, ParseStream},
-    punctuated::Punctuated,
-    Attribute,
-    Error,
-    Ident,
-    LitStr,
-    Token,
-    Result as SynResult,
-};
+use syn::{parse::ParseStream, punctuated::Punctuated, Error, LitStr, Result as SynResult, Token};
 
 /// A parsed `index(name = "...", columns(...), unique)` declaration.
 pub(crate) struct IndexAttr {
@@ -29,20 +20,13 @@ pub(crate) struct IndexAttr {
     pub(crate) unique:  bool,
 }
 
-impl Parse for IndexAttr {
-    fn parse(input: ParseStream) -> SynResult<Self> {
-        // `input` is the body of `strato(...)`, e.g. `index(name = "x", columns(a), unique)`.
-        let keyword = input.parse::<Ident>()?;
-        if keyword != "index" {
-            return Err(Error::new(
-                keyword.span(),
-                "unsupported `#[strato(...)]` attribute; expected `index(...)`",
-            ));
-        }
-
-        let inner;
-        syn::parenthesized!(inner in input);
-        let items = Punctuated::<Item, Token![,]>::parse_terminated(&inner)?;
+impl IndexAttr {
+    /// Parses the body of an `index(...)` item — `input` is the parenthesized
+    /// content (`name = "x", columns(a), unique`), the `index` keyword and parens
+    /// already consumed by the container parser.
+    pub(crate) fn from_body(input: ParseStream) -> SynResult<Self> {
+        let span = input.span();
+        let items = Punctuated::<Item, Token![,]>::parse_terminated(input)?;
 
         let mut name = None;
         let mut columns = None;
@@ -55,10 +39,10 @@ impl Parse for IndexAttr {
             }
         }
 
-        let name = name.ok_or_else(|| Error::new(keyword.span(), "index requires `name = \"...\"`"))?;
-        let columns = columns.ok_or_else(|| Error::new(keyword.span(), "index requires `columns(...)`"))?;
+        let name = name.ok_or_else(|| Error::new(span, "index requires `name = \"...\"`"))?;
+        let columns = columns.ok_or_else(|| Error::new(span, "index requires `columns(...)`"))?;
         if columns.is_empty() {
-            return Err(Error::new(keyword.span(), "index requires at least one column"));
+            return Err(Error::new(span, "index requires at least one column"));
         }
 
         Ok(IndexAttr {
@@ -67,13 +51,4 @@ impl Parse for IndexAttr {
             unique,
         })
     }
-}
-
-/// Parses every `#[strato(index(...))]` declaration from `attrs`.
-pub(crate) fn index_attrs(attrs: &[Attribute]) -> SynResult<Vec<IndexAttr>> {
-    attrs
-        .iter()
-        .filter(|attr| attr.path().is_ident("strato"))
-        .map(|attr| attr.parse_args::<IndexAttr>())
-        .collect()
 }

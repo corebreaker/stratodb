@@ -248,3 +248,72 @@ fn derived_descriptors_expose_members() {
         vec!["Unit", "Circle", "Rect", "Labeled"]
     );
 }
+
+#[derive(SData, Debug, PartialEq)]
+#[strato(rename_all = "camelCase")]
+struct Renamed {
+    first_name: String,
+    #[strato(rename = "years")]
+    age:        u32,
+    #[strato(alias = "handle", alias = "nick")]
+    nickname:   String,
+}
+
+#[test]
+fn rename_rename_all_and_alias() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = StratoDb::create(dir.path().join("renamed.stratodb")).unwrap();
+    let table = db.open_table("data").unwrap();
+
+    let value = Renamed {
+        first_name: String::from("Ada"),
+        age:        36,
+        nickname:   String::from("countess"),
+    };
+
+    let w = table.write().unwrap();
+    w.store("p", &value).unwrap();
+    w.commit().unwrap();
+
+    let r = table.read().unwrap();
+
+    // Stored under the camelCase / renamed node names, not the Rust field names.
+    assert_eq!(r.get::<String>("p/firstName").unwrap(), Some(String::from("Ada")));
+    assert_eq!(r.get::<u32>("p/years").unwrap(), Some(36)); // field `rename` beats `rename_all`
+    assert_eq!(r.get::<String>("p/nickname").unwrap(), Some(String::from("countess")));
+    assert!(r.get::<String>("p/first_name").unwrap().is_none());
+    assert!(r.get::<u32>("p/age").unwrap().is_none());
+
+    // Full roundtrip; accessor method names are the Rust fields, nodes are renamed.
+    assert_eq!(r.load::<Renamed>("p").unwrap(), value);
+
+    let acc = r.fetch::<StratoRenamed>("p").unwrap();
+    assert_eq!(acc.first_name().unwrap().get().unwrap(), "Ada");
+    assert_eq!(acc.age().unwrap().get().unwrap(), 36);
+
+    // The descriptor reports the stored names.
+    assert_eq!(StratoRenamedDesc::FIELDS, &["firstName", "years", "nickname"]);
+}
+
+#[test]
+fn alias_is_accepted_on_load() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = StratoDb::create(dir.path().join("alias.stratodb")).unwrap();
+    let table = db.open_table("data").unwrap();
+
+    // `nickname` data stored under one of its aliases (a legacy node name).
+    let w = table.write().unwrap();
+    w.put("p/firstName", &String::from("Bob")).unwrap();
+    w.put("p/years", &40u32).unwrap();
+    w.put("p/handle", &String::from("bobby")).unwrap();
+    w.commit().unwrap();
+
+    assert_eq!(
+        table.read().unwrap().load::<Renamed>("p").unwrap(),
+        Renamed {
+            first_name: String::from("Bob"),
+            age:        40,
+            nickname:   String::from("bobby"),
+        }
+    );
+}
