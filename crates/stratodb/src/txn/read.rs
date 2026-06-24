@@ -1,5 +1,6 @@
 //! Opaque read transaction.
 
+use super::rooted::RootedRead;
 use crate::{
     access::{ReadCursor, Reader, Rooted},
     cache::PathCache,
@@ -45,27 +46,17 @@ impl ReadTxn {
 
     /// Reads the value at `path`, decoded as `V`.
     pub fn get<V: SValue>(&self, path: &str) -> SdbResult<Option<V>> {
-        let path = SPath::parse(path)?;
-        match self.scalar_at_path(&path)? {
-            Some(scalar) => Ok(Some(V::from_scalar(&scalar)?)),
-            None => Ok(None),
-        }
+        self.get_at(&SPath::parse(path)?)
     }
 
     /// Reads the raw scalar at `path`.
     pub fn get_scalar(&self, path: &str) -> SdbResult<Option<Scalar>> {
-        let path = SPath::parse(path)?;
-        self.scalar_at_path(&path)
+        self.scalar_at_path(&SPath::parse(path)?)
     }
 
     /// Reports the kind of node at `path`, if any.
     pub fn kind(&self, path: &str) -> SdbResult<Option<NodeKind>> {
-        let path = SPath::parse(path)?;
-        let Some(key) = self.lookup_path(&path)? else {
-            return Ok(None);
-        };
-
-        self.lookup_kind(key)
+        self.kind_at(&SPath::parse(path)?)
     }
 
     /// Returns whether a node exists at `path`.
@@ -75,20 +66,52 @@ impl ReadTxn {
 
     /// Reads a typed read accessor for the value at `path`.
     pub fn fetch<'t, A: SRef<'t>>(&'t self, path: &str) -> SdbResult<A> {
-        let base = SPath::parse(path)?;
-        let cursor = ReadCursor::new(self);
-        let key = cursor
-            .resolve(&base)?
-            .ok_or_else(|| SdbError::PathNotFound(base.clone()))?;
-
-        Ok(A::open(Arc::new(cursor), base, key))
+        self.fetch_at(&SPath::parse(path)?)
     }
 
     /// Recomposes a whole `T` from the subtree at `path`.
     pub fn load<T: SData>(&self, path: &str) -> SdbResult<T> {
-        let base = SPath::parse(path)?;
+        self.load_at(&SPath::parse(path)?)
+    }
 
-        T::load(&ReadCursor::new(self), &base)
+    /// Returns a view of this transaction whose paths are relative to `root`.
+    ///
+    /// Every path passed to the returned [`RootedRead`] resolves as `root` then
+    /// the path, so `txn.rooted(SPath::parse("users/alice")?).get("age")` reads
+    /// `users/alice/age`. The view borrows the transaction. Index queries
+    /// (`find`) are not re-rooted — indexes are defined over the whole table.
+    pub fn rooted(&self, root: SPath) -> RootedRead<'_> {
+        RootedRead::new(self, root)
+    }
+
+    // -- path-addressed cores (shared by the `&str` API and rooted views) --
+
+    pub(crate) fn get_at<V: SValue>(&self, path: &SPath) -> SdbResult<Option<V>> {
+        match self.scalar_at_path(path)? {
+            Some(scalar) => Ok(Some(V::from_scalar(&scalar)?)),
+            None => Ok(None),
+        }
+    }
+
+    pub(crate) fn kind_at(&self, path: &SPath) -> SdbResult<Option<NodeKind>> {
+        let Some(key) = self.lookup_path(path)? else {
+            return Ok(None);
+        };
+
+        self.lookup_kind(key)
+    }
+
+    pub(crate) fn fetch_at<'t, A: SRef<'t>>(&'t self, base: &SPath) -> SdbResult<A> {
+        let cursor = ReadCursor::new(self);
+        let key = cursor
+            .resolve(base)?
+            .ok_or_else(|| SdbError::PathNotFound(base.clone()))?;
+
+        Ok(A::open(Arc::new(cursor), base.clone(), key))
+    }
+
+    pub(crate) fn load_at<T: SData>(&self, base: &SPath) -> SdbResult<T> {
+        T::load(&ReadCursor::new(self), base)
     }
 
     /// Finds the entities an index points at for an exact match on `values`,

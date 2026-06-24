@@ -1,0 +1,19 @@
+//! Rooted transaction views.
+//!
+//! [`ReadTxn::rooted`](super::ReadTxn::rooted) and
+//! [`WriteTxn::rooted`](super::WriteTxn::rooted) return a [`RootedRead`] /
+//! [`RootedWrite`] that interprets every path relative to a fixed root: each call
+//! joins `root` with the given path and forwards to the underlying transaction,
+//! so `txn.rooted(SPath::parse("users/alice")?).get("age")` reads
+//! `users/alice/age`. Resolution still walks from the table root each time (the
+//! root is a path prefix, not a cached key), so the view stays correct even as the
+//! tree under `root` is created or replaced.
+//!
+//! A view borrows its transaction, so it must be dropped before the transaction
+//! is committed — the same rule write accessors follow. Views nest: `rooted`
+//! again to descend further.
+
+mod read;
+mod write;
+
+pub use self::{read::RootedRead, write::RootedWrite};

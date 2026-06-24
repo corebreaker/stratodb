@@ -86,6 +86,18 @@ impl SPath {
         path
     }
 
+    /// Returns this path followed by `tail`'s segments — `tail` resolved relative
+    /// to `self`. Joining segment lists (rather than path strings) keeps index
+    /// segments unambiguous, since they attach to a name without a separator.
+    pub fn join(&self, tail: &SPath) -> Self {
+        let mut segments = self.segments.clone();
+        segments.extend_from_slice(&tail.segments);
+
+        SPath {
+            segments,
+        }
+    }
+
     /// The parent path, or `None` for the root.
     pub fn parent(&self) -> Option<SPath> {
         if self.segments.is_empty() {

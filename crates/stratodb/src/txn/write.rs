@@ -1,5 +1,6 @@
 //! Opaque write transaction.
 
+use super::rooted::RootedWrite;
 use crate::{
     access::{Reader, WriteCursor, Writer},
     data::{refs::SMut, SData, Scalar, SValue},
@@ -57,55 +58,78 @@ impl WriteTxn {
 
     /// Decomposes and stores a whole `value` at `path`, replacing any subtree there.
     pub fn store<T: SData>(&self, path: &str, value: &T) -> SdbResult<()> {
-        let base = SPath::parse(path)?;
-        let cursor = WriteCursor::new(self);
-        cursor.remove(&base)?;
-
-        value.store(&cursor, &base)
+        self.store_at(&SPath::parse(path)?, value)
     }
 
     /// Removes the subtree at `path`, returning whether anything was removed.
     pub fn remove(&self, path: &str) -> SdbResult<bool> {
-        let path = SPath::parse(path)?;
-
-        self.remove_path_at(&path)
+        self.remove_path_at(&SPath::parse(path)?)
     }
 
     /// Reads the value at `path` within this transaction, decoded as `V`.
     pub fn get<V: SValue>(&self, path: &str) -> SdbResult<Option<V>> {
-        let path = SPath::parse(path)?;
+        self.get_at(&SPath::parse(path)?)
+    }
+
+    /// Reports the kind of node at `path`, if any.
+    pub fn kind(&self, path: &str) -> SdbResult<Option<NodeKind>> {
+        self.kind_at(&SPath::parse(path)?)
+    }
+
+    /// Reads a typed write accessor for the value at `path`.
+    pub fn fetch_mut<'t, A: SMut<'t>>(&'t self, path: &str) -> SdbResult<A> {
+        self.fetch_mut_at(&SPath::parse(path)?)
+    }
+
+    /// Recomposes a whole `T` from the subtree at `path`.
+    pub fn load<T: SData>(&self, path: &str) -> SdbResult<T> {
+        self.load_at(&SPath::parse(path)?)
+    }
+
+    /// Returns a view of this transaction whose paths are relative to `root`.
+    ///
+    /// Every path passed to the returned [`RootedWrite`] resolves as `root` then
+    /// the path. The view borrows the transaction, so it must be dropped before
+    /// [`commit`](WriteTxn::commit) (like a write accessor).
+    pub fn rooted(&self, root: SPath) -> RootedWrite<'_> {
+        RootedWrite::new(self, root)
+    }
+
+    // -- path-addressed cores (shared by the `&str` API and rooted views) --
+
+    pub(crate) fn store_at<T: SData>(&self, base: &SPath, value: &T) -> SdbResult<()> {
+        let cursor = WriteCursor::new(self);
+        cursor.remove(base)?;
+
+        value.store(&cursor, base)
+    }
+
+    pub(crate) fn get_at<V: SValue>(&self, path: &SPath) -> SdbResult<Option<V>> {
         let table = self.txn.open_table(engine::data_def(&self.table))?;
 
-        match tree::get_scalar(&table, &path)? {
+        match tree::get_scalar(&table, path)? {
             Some(scalar) => Ok(Some(V::from_scalar(&scalar)?)),
             None => Ok(None),
         }
     }
 
-    /// Reports the kind of node at `path`, if any.
-    pub fn kind(&self, path: &str) -> SdbResult<Option<NodeKind>> {
-        let path = SPath::parse(path)?;
+    pub(crate) fn kind_at(&self, path: &SPath) -> SdbResult<Option<NodeKind>> {
         let table = self.txn.open_table(engine::data_def(&self.table))?;
 
-        tree::kind(&table, &path)
+        tree::kind(&table, path)
     }
 
-    /// Reads a typed write accessor for the value at `path`.
-    pub fn fetch_mut<'t, A: SMut<'t>>(&'t self, path: &str) -> SdbResult<A> {
-        let base = SPath::parse(path)?;
+    pub(crate) fn fetch_mut_at<'t, A: SMut<'t>>(&'t self, base: &SPath) -> SdbResult<A> {
         let cursor = WriteCursor::new(self);
         let key = cursor
-            .resolve(&base)?
+            .resolve(base)?
             .ok_or_else(|| SdbError::PathNotFound(base.clone()))?;
 
-        Ok(A::open(Arc::new(cursor), base, key))
+        Ok(A::open(Arc::new(cursor), base.clone(), key))
     }
 
-    /// Recomposes a whole `T` from the subtree at `path`.
-    pub fn load<T: SData>(&self, path: &str) -> SdbResult<T> {
-        let base = SPath::parse(path)?;
-
-        T::load(&WriteCursor::new(self), &base)
+    pub(crate) fn load_at<T: SData>(&self, base: &SPath) -> SdbResult<T> {
+        T::load(&WriteCursor::new(self), base)
     }
 
     /// Commits the transaction, making its changes durable and bumping the
