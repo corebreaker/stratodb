@@ -118,3 +118,28 @@ fn seq_mut_insert_and_remove() {
     let r = table.read().unwrap();
     assert_eq!(r.load::<Vec<i32>>("xs").unwrap(), vec![0, 2, 4, 5]);
 }
+
+#[test]
+fn path_cache_stays_coherent_across_writes() {
+    let (_dir, table) = table();
+
+    let w = table.write().unwrap();
+    w.put("a/x", &1u32).unwrap();
+    w.commit().unwrap();
+
+    // First read populates the path cache for this generation.
+    let r1 = table.read().unwrap();
+    assert_eq!(r1.get::<u32>("a/x").unwrap(), Some(1));
+
+    // A second write changes the value and bumps the generation.
+    let w = table.write().unwrap();
+    w.put("a/x", &2u32).unwrap();
+    w.commit().unwrap();
+
+    // A fresh reader must see the new value, not a stale cached resolution.
+    let r2 = table.read().unwrap();
+    assert_eq!(r2.get::<u32>("a/x").unwrap(), Some(2));
+
+    // The older snapshot still resolves to its own value (cache keyed by generation).
+    assert_eq!(r1.get::<u32>("a/x").unwrap(), Some(1));
+}

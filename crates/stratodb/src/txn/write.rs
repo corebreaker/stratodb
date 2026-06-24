@@ -3,6 +3,7 @@
 use crate::{
     access::{Reader, WriteCursor, Writer},
     data::{refs::SMut, SData, Scalar, SValue},
+    db::DbInner,
     engine,
     error::{SdbError, SdbResult},
     node::NodeKind,
@@ -12,19 +13,21 @@ use crate::{
 };
 
 use redb::WriteTransaction;
-use std::sync::Arc;
+use std::sync::{atomic::Ordering, Arc};
 
 /// A read-write transaction. Changes are durable only after [`WriteTxn::commit`].
 pub struct WriteTxn {
     txn:   WriteTransaction,
     table: String,
+    inner: Arc<DbInner>,
 }
 
 impl WriteTxn {
-    pub(crate) fn new(txn: WriteTransaction, table: String) -> Self {
+    pub(crate) fn new(txn: WriteTransaction, table: String, inner: Arc<DbInner>) -> Self {
         Self {
             txn,
             table,
+            inner,
         }
     }
 
@@ -95,9 +98,25 @@ impl WriteTxn {
         T::load(&WriteCursor::new(self), &base)
     }
 
-    /// Commits the transaction, making its changes durable.
+    /// Commits the transaction, making its changes durable and bumping the
+    /// database generation so cached path resolutions from older snapshots are no
+    /// longer served.
     pub fn commit(self) -> SdbResult<()> {
-        self.txn.commit()?;
+        let WriteTxn {
+            txn,
+            inner,
+            ..
+        } = self;
+
+        let guard = inner
+            .version_lock
+            .write()
+            .map_err(|err| SdbError::CannotAccess(format!("version lock poisoned: {err}")))?;
+
+        txn.commit()?;
+        inner.generation.fetch_add(1, Ordering::Release);
+        drop(guard);
+
         Ok(())
     }
 

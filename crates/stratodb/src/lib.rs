@@ -28,6 +28,7 @@
 //! # }
 //! ```
 
+mod cache;
 mod codec;
 mod datetime;
 mod db;

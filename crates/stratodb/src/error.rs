@@ -15,7 +15,7 @@ pub enum SdbError {
     /// The concrete engine type is intentionally kept private so that the
     /// storage backend remains an implementation detail.
     #[error("storage engine error: {0}")]
-    Engine(#[source] Box<dyn std::error::Error + Send + Sync + 'static>),
+    Engine(#[source] Box<dyn Error + Send + Sync + 'static>),
 
     /// A path string could not be parsed into an [`SPath`].
     #[error("invalid path: {0}")]
@@ -74,6 +74,10 @@ pub enum SdbError {
     /// The on-disk format/schema does not match this build.
     #[error("schema mismatch: {0}")]
     SchemaMismatch(String),
+
+    /// A data access cannot be fulfilled.
+    #[error("impossible access: {0}")]
+    CannotAccess(String),
 }
 
 impl SdbError {

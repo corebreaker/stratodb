@@ -8,6 +8,7 @@ description = "A typed, transactional, indexed document store layered over an em
 
 [dependencies]
 chrono = "0.4"
+lru = "0.18"
 redb = "4.1"
 thiserror = "2.0"
 uuid = { version = "1.23", features = ["v7"] }

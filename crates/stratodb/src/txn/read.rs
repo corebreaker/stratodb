@@ -2,10 +2,11 @@
 
 use crate::{
     access::{ReadCursor, Reader},
+    cache::PathCache,
     data::{refs::SRef, SData, SValue, Scalar},
     engine::{self, TableKey, TableValue},
     error::{SdbError, SdbResult},
-    node::NodeKind,
+    node::{Node, NodeKind},
     path::{SPath, Segment},
     tree,
     Skey,
@@ -16,15 +17,19 @@ use std::sync::Arc;
 
 /// A read-only view of a table at a consistent point in time.
 pub struct ReadTxn {
-    txn:   ReadTransaction,
-    table: String,
+    txn:        ReadTransaction,
+    table:      String,
+    generation: u64,
+    cache:      Arc<PathCache>,
 }
 
 impl ReadTxn {
-    pub(crate) fn new(txn: ReadTransaction, table: String) -> Self {
+    pub(crate) fn new(txn: ReadTransaction, table: String, generation: u64, cache: Arc<PathCache>) -> Self {
         Self {
             txn,
             table,
+            generation,
+            cache,
         }
     }
 
@@ -40,11 +45,7 @@ impl ReadTxn {
     /// Reads the value at `path`, decoded as `V`.
     pub fn get<V: SValue>(&self, path: &str) -> SdbResult<Option<V>> {
         let path = SPath::parse(path)?;
-        let Some(table) = self.open()? else {
-            return Ok(None);
-        };
-
-        match tree::get_scalar(&table, &path)? {
+        match self.scalar_at_path(&path)? {
             Some(scalar) => Ok(Some(V::from_scalar(&scalar)?)),
             None => Ok(None),
         }
@@ -53,21 +54,17 @@ impl ReadTxn {
     /// Reads the raw scalar at `path`.
     pub fn get_scalar(&self, path: &str) -> SdbResult<Option<Scalar>> {
         let path = SPath::parse(path)?;
-        let Some(table) = self.open()? else {
-            return Ok(None);
-        };
-
-        tree::get_scalar(&table, &path)
+        self.scalar_at_path(&path)
     }
 
     /// Reports the kind of node at `path`, if any.
     pub fn kind(&self, path: &str) -> SdbResult<Option<NodeKind>> {
         let path = SPath::parse(path)?;
-        let Some(table) = self.open()? else {
+        let Some(key) = self.lookup_path(&path)? else {
             return Ok(None);
         };
 
-        tree::kind(&table, &path)
+        self.lookup_kind(key)
     }
 
     /// Returns whether a node exists at `path`.
@@ -93,14 +90,45 @@ impl ReadTxn {
         T::load(&ReadCursor::new(self), &base)
     }
 
-    // -- node-level reads used by `ReadCursor` (the table is opened per call) --
+    // -- resolution (cached) and node-level reads used by `ReadCursor` --
 
+    /// Resolves `path` to a key, consulting (and populating) the shared cache.
     pub(crate) fn lookup_path(&self, path: &SPath) -> SdbResult<Option<Skey>> {
+        if let Some(key) = self.cache.get(self.generation, path)? {
+            return Ok(Some(key));
+        }
+
         let Some(table) = self.open()? else {
             return Ok(None);
         };
 
-        tree::resolve(&table, path)
+        let resolved = tree::resolve(&table, path)?;
+        if let Some(key) = resolved {
+            self.cache.put(self.generation, path, key)?;
+        }
+
+        Ok(resolved)
+    }
+
+    /// Reads the scalar at `path` (resolving through the cache); errors if the node
+    /// there is not a leaf.
+    fn scalar_at_path(&self, path: &SPath) -> SdbResult<Option<Scalar>> {
+        let Some(key) = self.lookup_path(path)? else {
+            return Ok(None);
+        };
+        let Some(table) = self.open()? else {
+            return Ok(None);
+        };
+
+        match tree::read_node(&table, key)? {
+            Some(Node::Leaf(scalar)) => Ok(Some(scalar)),
+            Some(other) => Err(SdbError::UnexpectedNode {
+                path:     path.clone(),
+                expected: "leaf",
+                found:    other.kind().as_str(),
+            }),
+            None => Err(SdbError::Corrupt("path resolves to a missing node".into())),
+        }
     }
 
     pub(crate) fn lookup_child(&self, parent: Skey, seg: &Segment) -> SdbResult<Option<Skey>> {
@@ -120,11 +148,7 @@ impl ReadTxn {
     }
 
     pub(crate) fn lookup_scalar_at(&self, path: &SPath) -> SdbResult<Option<Scalar>> {
-        let Some(table) = self.open()? else {
-            return Ok(None);
-        };
-
-        tree::get_scalar(&table, path)
+        self.scalar_at_path(path)
     }
 
     pub(crate) fn lookup_kind(&self, key: Skey) -> SdbResult<Option<NodeKind>> {
