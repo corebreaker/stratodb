@@ -187,6 +187,18 @@ impl WriteTxn {
         tree::list_move(&mut table, list_key, from, to)
     }
 
+    pub(crate) fn list_swap_at(&self, list_key: Skey, i: usize, j: usize) -> SdbResult<()> {
+        let mut table = self.txn.open_table(engine::data_def(&self.table))?;
+
+        tree::list_swap(&mut table, list_key, i, j)
+    }
+
+    pub(crate) fn clear_children_at(&self, key: Skey) -> SdbResult<()> {
+        let mut table = self.txn.open_table(engine::data_def(&self.table))?;
+
+        tree::clear_children(&mut table, key)
+    }
+
     pub(crate) fn remove_path_at(&self, path: &SPath) -> SdbResult<bool> {
         let mut table = self.txn.open_table(engine::data_def(&self.table))?;
 

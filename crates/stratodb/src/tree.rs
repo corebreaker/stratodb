@@ -383,6 +383,72 @@ pub(crate) fn list_move(t: &mut DataTable<'_>, list_key: Skey, from: usize, to: 
     Ok(())
 }
 
+/// Swaps the elements at `i` and `j` within the list node `list_key`. Only the
+/// list node's vector changes; the swapped subtrees keep their keys.
+pub(crate) fn list_swap(t: &mut DataTable<'_>, list_key: Skey, i: usize, j: usize) -> SdbResult<()> {
+    let mut node = read_node(&*t, list_key)?.ok_or_else(|| {
+        const MSG: &str = "missing list node while swapping elements";
+
+        SdbError::Corrupt(MSG.into())
+    })?;
+
+    match &mut node {
+        Node::List(items) => {
+            let len = items.len();
+            if i >= len || j >= len {
+                return Err(SdbError::IndexOutOfRange {
+                    path:  SPath::root(),
+                    index: i.max(j) as u64,
+                    len:   len as u64,
+                });
+            }
+
+            items.swap(i, j);
+        }
+        other => {
+            return Err(SdbError::Corrupt(format!(
+                "node {list_key} is a {}, expected a list",
+                other.kind().as_str()
+            )));
+        }
+    }
+
+    write_node(t, list_key, &node)?;
+    Ok(())
+}
+
+/// Removes every child of the container node `key` (cascading), leaving an empty
+/// container of the same kind. Errors if `key` is a leaf.
+pub(crate) fn clear_children(t: &mut DataTable<'_>, key: Skey) -> SdbResult<()> {
+    let node = read_node(&*t, key)?.ok_or_else(|| {
+        const MSG: &str = "missing node while clearing children";
+
+        SdbError::Corrupt(MSG.into())
+    })?;
+
+    match node {
+        Node::Object(map) => {
+            for child in map.into_values() {
+                cascade_delete(t, child)?;
+            }
+
+            write_node(t, key, &Node::Object(BTreeMap::new()))?;
+        }
+        Node::List(items) => {
+            for child in items {
+                cascade_delete(t, child)?;
+            }
+
+            write_node(t, key, &Node::List(Vec::new()))?;
+        }
+        Node::Leaf(_) => {
+            return Err(SdbError::Corrupt(format!("node {key} is a leaf, expected a container")));
+        }
+    }
+
+    Ok(())
+}
+
 /// Deletes the subtree rooted at `key` (its node entry and all descendants').
 fn cascade_delete(t: &mut DataTable<'_>, key: Skey) -> SdbResult<()> {
     let mut stack = vec![key];

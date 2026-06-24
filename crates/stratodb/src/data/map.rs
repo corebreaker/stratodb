@@ -13,7 +13,7 @@ use super::{
 
 use crate::{
     access::{Reader, Writer},
-    error::SdbResult,
+    error::{SdbError, SdbResult},
     path::{SPath, Segment},
     Skey,
 };
@@ -98,6 +98,42 @@ impl<'t, T: SData> Map<'t, T> {
             at,
             child,
         )))
+    }
+
+    /// An iterator over `(key, read accessor)` pairs, in ascending key order.
+    ///
+    /// Each item is fallible (`SdbResult<(String, T::Ref)>`). The iterator is
+    /// double-ended, so the standard adapters apply: `map.iter()?.rev()`,
+    /// `.fold(..)`, `.filter(..)`, `.map(..)`, etc.
+    pub fn iter(&self) -> SdbResult<impl DoubleEndedIterator<Item = SdbResult<(String, T::Ref<'t>)>> + 't> {
+        let names = self.keys()?;
+        let reader = Arc::clone(&self.reader);
+        let base = self.base.clone();
+        let key = self.key;
+
+        Ok(names.into_iter().map(move |name| {
+            let at = base.child_name(name.as_str());
+            let child = reader
+                .child_cached(key, &Segment::Name(name.clone()), &at)?
+                .ok_or_else(|| SdbError::PathNotFound(at.clone()))?;
+
+            Ok((name, <T::Ref<'t> as SRef<'t>>::open(Arc::clone(&reader), at, child)))
+        }))
+    }
+
+    /// An iterator over read accessors to the values, in ascending key order.
+    pub fn values(&self) -> SdbResult<impl DoubleEndedIterator<Item = SdbResult<T::Ref<'t>>> + 't> {
+        Ok(self.iter()?.map(|item| item.map(|(_, value)| value)))
+    }
+
+    /// The first `(key, read accessor)` entry (smallest key), or `None` if empty.
+    pub fn first(&self) -> SdbResult<Option<(String, T::Ref<'t>)>> {
+        self.iter()?.next().transpose()
+    }
+
+    /// The last `(key, read accessor)` entry (largest key), or `None` if empty.
+    pub fn last(&self) -> SdbResult<Option<(String, T::Ref<'t>)>> {
+        self.iter()?.next_back().transpose()
     }
 }
 
@@ -184,6 +220,105 @@ impl<'t, T: SData> MapMut<'t, T> {
     /// Removes `key`, returning whether it was present.
     pub fn remove(&self, key: &str) -> SdbResult<bool> {
         self.writer.remove(&self.base.child_name(key))
+    }
+
+    /// An iterator over `(key, write accessor)` pairs, in ascending key order.
+    ///
+    /// Like [`Map::iter`](super::Map::iter) but yields mutable value accessors;
+    /// double-ended, so `rev`/`fold`/`filter`/… apply.
+    pub fn iter_mut(&self) -> SdbResult<impl DoubleEndedIterator<Item = SdbResult<(String, T::Mut<'t>)>> + 't> {
+        let names = self.keys()?;
+        let writer = Arc::clone(&self.writer);
+        let base = self.base.clone();
+        let key = self.key;
+
+        Ok(names.into_iter().map(move |name| {
+            let at = base.child_name(name.as_str());
+            let child = writer
+                .child_cached(key, &Segment::Name(name.clone()), &at)?
+                .ok_or_else(|| SdbError::PathNotFound(at.clone()))?;
+
+            Ok((name, <T::Mut<'t> as SMut<'t>>::open(Arc::clone(&writer), at, child)))
+        }))
+    }
+
+    /// An iterator over write accessors to the values, in ascending key order.
+    pub fn values_mut(&self) -> SdbResult<impl DoubleEndedIterator<Item = SdbResult<T::Mut<'t>>> + 't> {
+        Ok(self.iter_mut()?.map(|item| item.map(|(_, value)| value)))
+    }
+
+    /// The first `(key, write accessor)` entry (smallest key), or `None` if empty.
+    pub fn first_mut(&self) -> SdbResult<Option<(String, T::Mut<'t>)>> {
+        self.iter_mut()?.next().transpose()
+    }
+
+    /// The last `(key, write accessor)` entry (largest key), or `None` if empty.
+    pub fn last_mut(&self) -> SdbResult<Option<(String, T::Mut<'t>)>> {
+        self.iter_mut()?.next_back().transpose()
+    }
+
+    /// Removes and returns the first entry (smallest key), or `None` if empty.
+    pub fn pop_first(&self) -> SdbResult<Option<(String, T)>> {
+        let Some(name) = self.keys()?.into_iter().next() else {
+            return Ok(None);
+        };
+
+        let value = T::load(&self.writer, &self.base.child_name(name.as_str()))?;
+        self.writer.remove(&self.base.child_name(name.as_str()))?;
+
+        Ok(Some((name, value)))
+    }
+
+    /// Removes and returns the last entry (largest key), or `None` if empty.
+    pub fn pop_last(&self) -> SdbResult<Option<(String, T)>> {
+        let Some(name) = self.keys()?.into_iter().next_back() else {
+            return Ok(None);
+        };
+
+        let value = T::load(&self.writer, &self.base.child_name(name.as_str()))?;
+        self.writer.remove(&self.base.child_name(name.as_str()))?;
+
+        Ok(Some((name, value)))
+    }
+
+    /// Removes every entry, leaving an empty map.
+    pub fn clear(&self) -> SdbResult<()> {
+        self.writer.clear_children(self.key)
+    }
+
+    /// Keeps only the entries for which `keep` returns `true`. `keep` is called
+    /// once per entry, in ascending key order, on the recomposed value.
+    pub fn retain(&self, mut keep: impl FnMut(&str, &T) -> bool) -> SdbResult<()> {
+        for name in self.keys()? {
+            let value = T::load(&self.writer, &self.base.child_name(name.as_str()))?;
+            if !keep(name.as_str(), &value) {
+                self.writer.remove(&self.base.child_name(name.as_str()))?;
+            }
+        }
+
+        Ok(())
+    }
+
+    /// Removes every entry and returns them, in ascending key order.
+    pub fn drain(&self) -> SdbResult<BTreeMap<String, T>> {
+        let mut drained = BTreeMap::new();
+        for name in self.keys()? {
+            let value = T::load(&self.writer, &self.base.child_name(name.as_str()))?;
+            drained.insert(name, value);
+        }
+
+        self.writer.clear_children(self.key)?;
+
+        Ok(drained)
+    }
+
+    /// Inserts every `(key, value)` yielded by `iter`, replacing existing entries.
+    pub fn extend<I: IntoIterator<Item = (String, T)>>(&self, iter: I) -> SdbResult<()> {
+        for (name, value) in iter {
+            self.insert(name.as_str(), &value)?;
+        }
+
+        Ok(())
     }
 }
 

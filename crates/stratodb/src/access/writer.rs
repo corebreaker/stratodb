@@ -26,6 +26,12 @@ pub trait Writer: Reader {
     /// Moves a list element from `from` to `to` within list node `list_key`,
     /// reordering positions without touching the moved subtree (keys are stable).
     fn list_move(&self, list_key: Skey, from: usize, to: usize) -> SdbResult<()>;
+
+    /// Swaps the elements at `i` and `j` within list node `list_key` (keys stable).
+    fn list_swap(&self, list_key: Skey, i: usize, j: usize) -> SdbResult<()>;
+
+    /// Removes every child of container node `key`, leaving it empty.
+    fn clear_children(&self, key: Skey) -> SdbResult<()>;
 }
 
 impl Reader for Box<dyn Writer + '_> {
@@ -101,6 +107,18 @@ impl Writer for Box<dyn Writer + '_> {
         let this = Box::as_ref(self);
 
         this.list_move(list_key, from, to)
+    }
+
+    fn list_swap(&self, list_key: Skey, i: usize, j: usize) -> SdbResult<()> {
+        let this = Box::as_ref(self);
+
+        this.list_swap(list_key, i, j)
+    }
+
+    fn clear_children(&self, key: Skey) -> SdbResult<()> {
+        let this = Box::as_ref(self);
+
+        this.clear_children(key)
     }
 }
 
@@ -178,6 +196,18 @@ impl Writer for Arc<dyn Writer + '_> {
 
         this.list_move(list_key, from, to)
     }
+
+    fn list_swap(&self, list_key: Skey, i: usize, j: usize) -> SdbResult<()> {
+        let this = Arc::as_ref(self);
+
+        this.list_swap(list_key, i, j)
+    }
+
+    fn clear_children(&self, key: Skey) -> SdbResult<()> {
+        let this = Arc::as_ref(self);
+
+        this.clear_children(key)
+    }
 }
 
 /// A copyable read/write cursor bound to a write transaction.
@@ -239,5 +269,13 @@ impl Writer for WriteCursor<'_> {
 
     fn list_move(&self, list_key: Skey, from: usize, to: usize) -> SdbResult<()> {
         self.txn.list_move_at(list_key, from, to)
+    }
+
+    fn list_swap(&self, list_key: Skey, i: usize, j: usize) -> SdbResult<()> {
+        self.txn.list_swap_at(list_key, i, j)
+    }
+
+    fn clear_children(&self, key: Skey) -> SdbResult<()> {
+        self.txn.clear_children_at(key)
     }
 }

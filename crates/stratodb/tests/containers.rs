@@ -155,8 +155,8 @@ fn map_roundtrips_and_is_accessible() {
     let (_dir, table) = table();
 
     let mut ages = BTreeMap::new();
-    ages.insert("alice".to_string(), 30i32);
-    ages.insert("bob".to_string(), 41i32);
+    ages.insert(String::from("alice"), 30i32);
+    ages.insert(String::from("bob"), 41i32);
 
     let w = table.write().unwrap();
     w.store("ages", &ages).unwrap();
@@ -167,7 +167,7 @@ fn map_roundtrips_and_is_accessible() {
 
     let map = r.fetch::<Map<i32>>("ages").unwrap();
     assert_eq!(map.len().unwrap(), 2);
-    assert_eq!(map.keys().unwrap(), vec!["alice".to_string(), "bob".to_string()]);
+    assert_eq!(map.keys().unwrap(), vec![String::from("alice"), String::from("bob")]);
     assert_eq!(map.get("bob").unwrap().unwrap().get().unwrap(), 41);
     assert!(map.get("carol").unwrap().is_none());
     assert!(map.contains_key("alice").unwrap());
@@ -200,7 +200,7 @@ fn map_mut_insert_and_remove() {
 
     let w = table.write().unwrap();
     let mut initial = BTreeMap::new();
-    initial.insert("a".to_string(), 1i32);
+    initial.insert(String::from("a"), 1i32);
     w.store("m", &initial).unwrap();
     {
         let m = w.fetch_mut::<MapMut<i32>>("m").unwrap();
@@ -214,6 +214,171 @@ fn map_mut_insert_and_remove() {
 
     let r = table.read().unwrap();
     let mut expected = BTreeMap::new();
-    expected.insert("b".to_string(), 2i32);
+    expected.insert(String::from("b"), 2i32);
     assert_eq!(r.load::<BTreeMap<String, i32>>("m").unwrap(), expected);
+}
+
+#[test]
+fn seq_iteration_and_queries() {
+    let (_dir, table) = table();
+
+    let w = table.write().unwrap();
+    w.store("xs", &vec![10i32, 20, 30]).unwrap();
+    w.commit().unwrap();
+
+    let r = table.read().unwrap();
+    let seq = r.fetch::<Seq<i32>>("xs").unwrap();
+
+    let forward: Vec<i32> = seq.iter().unwrap().map(|item| item.unwrap().get().unwrap()).collect();
+    assert_eq!(forward, vec![10, 20, 30]);
+
+    // The adapters come free from the double-ended iterator.
+    let reversed: Vec<i32> = seq
+        .iter()
+        .unwrap()
+        .rev()
+        .map(|item| item.unwrap().get().unwrap())
+        .collect();
+    assert_eq!(reversed, vec![30, 20, 10]);
+
+    assert_eq!(seq.first().unwrap().unwrap().get().unwrap(), 10);
+    assert_eq!(seq.last().unwrap().unwrap().get().unwrap(), 30);
+    assert!(seq.contains(&20).unwrap());
+    assert!(!seq.contains(&99).unwrap());
+}
+
+#[test]
+fn seq_mut_reordering_and_bulk_ops() {
+    let (_dir, table) = table();
+
+    let w = table.write().unwrap();
+    w.store("xs", &vec![1i32, 2, 3, 4, 5]).unwrap();
+    {
+        let xs = w.fetch_mut::<SeqMut<i32>>("xs").unwrap();
+
+        xs.swap(0, 4).unwrap(); // [5, 2, 3, 4, 1]
+        assert_eq!(xs.swap_remove(0).unwrap(), Some(5)); // [1, 2, 3, 4]
+        assert_eq!(xs.pop_last().unwrap(), Some(4)); // [1, 2, 3]
+        assert_eq!(xs.pop_first().unwrap(), Some(1)); // [2, 3]
+        xs.extend([10, 11]).unwrap(); // [2, 3, 10, 11]
+        xs.retain(|v| v % 2 == 1).unwrap(); // [3, 11]
+        assert_eq!(xs.drain(0..1).unwrap(), vec![3]); // [11]
+        assert_eq!(xs.first_mut().unwrap().unwrap().get().unwrap(), 11);
+        assert_eq!(xs.last_mut().unwrap().unwrap().get().unwrap(), 11);
+    }
+    w.commit().unwrap();
+
+    let r = table.read().unwrap();
+    assert_eq!(r.load::<Vec<i32>>("xs").unwrap(), vec![11]);
+}
+
+#[test]
+fn seq_clear_empties_the_list() {
+    let (_dir, table) = table();
+
+    let w = table.write().unwrap();
+    w.store("xs", &vec![1i32, 2, 3]).unwrap();
+    {
+        let xs = w.fetch_mut::<SeqMut<i32>>("xs").unwrap();
+        xs.clear().unwrap();
+        assert!(xs.is_empty().unwrap());
+    }
+    w.commit().unwrap();
+
+    let r = table.read().unwrap();
+    assert_eq!(r.load::<Vec<i32>>("xs").unwrap(), Vec::<i32>::new());
+    assert_eq!(r.kind("xs").unwrap(), Some(NodeKind::List));
+}
+
+fn sample_map() -> BTreeMap<String, i32> {
+    let mut m = BTreeMap::new();
+    m.insert(String::from("a"), 1);
+    m.insert(String::from("b"), 2);
+    m.insert(String::from("c"), 3);
+    m
+}
+
+#[test]
+fn map_iteration_and_queries() {
+    let (_dir, table) = table();
+
+    let w = table.write().unwrap();
+    w.store("m", &sample_map()).unwrap();
+    w.commit().unwrap();
+
+    let r = table.read().unwrap();
+    let map = r.fetch::<Map<i32>>("m").unwrap();
+
+    let pairs: Vec<(String, i32)> = map
+        .iter()
+        .unwrap()
+        .map(|item| {
+            let (key, value) = item.unwrap();
+            (key, value.get().unwrap())
+        })
+        .collect();
+    assert_eq!(
+        pairs,
+        vec![(String::from("a"), 1), (String::from("b"), 2), (String::from("c"), 3)]
+    );
+
+    let values: Vec<i32> = map.values().unwrap().map(|v| v.unwrap().get().unwrap()).collect();
+    assert_eq!(values, vec![1, 2, 3]);
+
+    // rev via the double-ended iterator.
+    let rev_keys: Vec<String> = map.iter().unwrap().rev().map(|item| item.unwrap().0).collect();
+    assert_eq!(rev_keys, vec![String::from("c"), String::from("b"), String::from("a")]);
+
+    let (first_key, first_value) = map.first().unwrap().unwrap();
+    assert_eq!((first_key.as_str(), first_value.get().unwrap()), ("a", 1));
+    let (last_key, last_value) = map.last().unwrap().unwrap();
+    assert_eq!((last_key.as_str(), last_value.get().unwrap()), ("c", 3));
+}
+
+#[test]
+fn map_mut_bulk_ops() {
+    let (_dir, table) = table();
+
+    let w = table.write().unwrap();
+    let mut initial = sample_map();
+    initial.insert(String::from("d"), 4);
+    w.store("m", &initial).unwrap();
+    {
+        let mm = w.fetch_mut::<MapMut<i32>>("m").unwrap();
+
+        assert_eq!(mm.pop_first().unwrap(), Some((String::from("a"), 1))); // {b, c, d}
+        assert_eq!(mm.pop_last().unwrap(), Some((String::from("d"), 4))); // {b, c}
+        mm.extend([(String::from("x"), 10), (String::from("y"), 11)]).unwrap(); // {b, c, x, y}
+        mm.retain(|key, _| key != "c").unwrap(); // {b, x, y}
+
+        let (key, value) = mm.first_mut().unwrap().unwrap(); // smallest key = "b"
+        assert_eq!(key, "b");
+        value.set(&99).unwrap(); // b = 99
+    }
+    w.commit().unwrap();
+
+    let r = table.read().unwrap();
+    let mut expected = BTreeMap::new();
+    expected.insert(String::from("b"), 99);
+    expected.insert(String::from("x"), 10);
+    expected.insert(String::from("y"), 11);
+    assert_eq!(r.load::<BTreeMap<String, i32>>("m").unwrap(), expected);
+}
+
+#[test]
+fn map_drain_and_clear() {
+    let (_dir, table) = table();
+
+    let w = table.write().unwrap();
+    w.store("m", &sample_map()).unwrap();
+    {
+        let mm = w.fetch_mut::<MapMut<i32>>("m").unwrap();
+        assert_eq!(mm.drain().unwrap(), sample_map());
+        assert!(mm.is_empty().unwrap());
+    }
+    w.commit().unwrap();
+
+    let r = table.read().unwrap();
+    assert_eq!(r.load::<BTreeMap<String, i32>>("m").unwrap(), BTreeMap::new());
+    assert_eq!(r.kind("m").unwrap(), Some(NodeKind::Object));
 }
