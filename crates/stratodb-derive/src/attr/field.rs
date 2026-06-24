@@ -9,9 +9,9 @@ use quote::quote;
 #[derive(Default)]
 pub(crate) struct FieldAttrs {
     /// Overrides the field's stored node name.
-    rename:  Option<String>,
+    rename:        Option<String>,
     /// Extra node names accepted when loading (the primary name is still used to store).
-    aliases: Vec<String>,
+    aliases:       Vec<String>,
     /// Never store or load this field (load uses [`default`](Self::default)).
     skip:          bool,
     /// Never store this field.
@@ -38,6 +38,13 @@ impl FieldAttrs {
     /// getter and `Desc::FIELDS`. A never-stored field (`skip`/`skip_store`) is not.
     pub(crate) fn in_shape(&self) -> bool {
         !self.skip && !self.skip_store
+    }
+
+    /// Whether `load` reads the field from its stored node. A field that is never
+    /// stored (`skip`/`skip_store`) or never loaded (`skip_load`) takes its
+    /// [`default`](Self::default_expr) instead.
+    pub(crate) fn loads_from_node(&self) -> bool {
+        self.in_shape() && !self.skip_load
     }
 
     fn parse_items(&mut self, input: ParseStream) -> SynResult<()> {

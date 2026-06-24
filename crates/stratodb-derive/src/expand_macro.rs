@@ -57,7 +57,7 @@ pub(super) fn expand_macro(input: DeriveInput) -> SynResult<TokenStream2> {
             },
         };
 
-        parts.push(FieldParts::new( 
+        parts.push(FieldParts::new(
             getter,
             format_ident!("{}_mut", getter),
             &field.ty,

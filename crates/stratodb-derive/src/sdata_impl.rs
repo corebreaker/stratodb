@@ -60,8 +60,8 @@ fn load_value(p: &FieldParts) -> TokenStream2 {
     let field = p.name();
     let attrs = p.attrs();
 
-    // Never read: use the default.
-    if !attrs.in_shape() {
+    // Never read (`skip`/`skip_store`/`skip_load`): use the default.
+    if !attrs.loads_from_node() {
         return attrs.default_expr();
     }
 

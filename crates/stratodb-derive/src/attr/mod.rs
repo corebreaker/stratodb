@@ -4,7 +4,7 @@
 mod container;
 mod default;
 mod field;
-mod rename;
 mod misc;
+mod rename;
 
 pub(crate) use self::{container::ContainerAttrs, field::FieldAttrs};
