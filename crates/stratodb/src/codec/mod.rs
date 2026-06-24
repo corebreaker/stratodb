@@ -4,7 +4,10 @@
 //! directly byte-comparable. Variable-length byte runs are length-prefixed so
 //! that the encoders are self-delimiting.
 
-mod reader;
 mod putters;
+mod reader;
 
-pub(crate) use self::{putters::{put_u32, put_bytes}, reader::Reader};
+pub(crate) use self::{
+    putters::{put_u32, put_bytes},
+    reader::Reader,
+};
