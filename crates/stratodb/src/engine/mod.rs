@@ -7,7 +7,7 @@
 //!
 //! A single engine table per StratoDB table holds both data nodes and index
 //! entries. The leading discriminant of [`TableKey`] partitions the key space
-//! into contiguous `Data`, `Path` and `Index` ranges.
+//! into contiguous `Data` and index ranges.
 
 mod errors;
 mod functions;

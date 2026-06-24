@@ -1,8 +1,8 @@
 //! The composite value type stored in a StratoDB data table.
 //!
 //! A [`TableValue`] is the payload an engine entry maps to: a node (for `Data`
-//! keys), a referenced primary key (for `Path` keys and unique index entries),
-//! or nothing (for non-unique index entries).
+//! keys), a referenced primary key (the entity, for unique index entries), or
+//! nothing (for non-unique index entries, whose entity lives in the key).
 
 use crate::{
     codec::Reader,
@@ -24,7 +24,7 @@ mod tag {
 pub(crate) enum TableValue {
     /// A stored node (for `Data` keys).
     Node(Node),
-    /// A referenced primary key (for `Path` keys and unique index entries).
+    /// A referenced primary key (the entity, for unique index entries).
     Skey(Skey),
     /// No payload (for non-unique index entries).
     Unit,
