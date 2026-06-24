@@ -5,7 +5,7 @@ use crate::{
     db::DbInner,
     engine::META_TABLE,
     error::{SdbError, SdbResult},
-    index::{registry, IndexDef},
+    index::{registry, IndexDef, SIndexed},
     txn::{ReadTxn, WriteTxn},
 };
 
@@ -74,8 +74,9 @@ impl Table {
     ///
     /// Idempotent for an identical definition; errors with
     /// [`SchemaMismatch`](crate::SdbError::SchemaMismatch) if `def.name` already
-    /// names a different index here. The index is registered only — write-time
-    /// maintenance and queries arrive in later milestone-3 steps.
+    /// names a different index here. Subsequent writes maintain the index and
+    /// queries can use it; existing data is **not** back-filled, so create indexes
+    /// before populating the table.
     pub fn create_index(&self, def: &IndexDef) -> SdbResult<()> {
         let txn = self.inner.db.begin_write()?;
         {
@@ -83,6 +84,18 @@ impl Table {
             registry::create(&mut meta, &self.name, def)?;
         }
         txn.commit()?;
+
+        Ok(())
+    }
+
+    /// Registers every index that `T` declares (via `#[sdata(index(...))]`),
+    /// scoping each to `pattern`. A shorthand for calling [`create_index`] for each
+    /// of [`T::index_defs`](SIndexed::index_defs); same idempotency and back-fill
+    /// caveats apply.
+    pub fn create_indexes<T: SIndexed>(&self, pattern: &str) -> SdbResult<()> {
+        for def in T::index_defs(pattern) {
+            self.create_index(&def)?;
+        }
 
         Ok(())
     }

@@ -14,19 +14,26 @@
 //!
 //! Enums derive too: they shred **externally tagged** (an object with one field
 //! named after the active variant). v1 supports structs with named fields and
-//! enums; tuple/unit structs, generics and `#[sdata(...)]` attributes are
-//! reported as errors for now.
+//! enums; tuple/unit structs and generics are reported as errors.
+//!
+//! A struct may also declare secondary indexes with `#[sdata(index(...))]`,
+//! generating an [`SIndexed`](../stratodb/index/trait.SIndexed.html) impl (see
+//! [`index_attr`]).
 
 mod desc;
 mod enum_data;
 mod expand_macro;
 mod field_parts;
+mod index;
 mod named_fields;
 mod refs;
 mod sdata_impl;
 
 /// Derives [`SData`] for a struct with named fields or an enum.
-#[proc_macro_derive(SData)]
+///
+/// Structs may carry `#[sdata(index(...))]` attributes to declare secondary
+/// indexes (see [`index_attr`]).
+#[proc_macro_derive(SData, attributes(sdata))]
 pub fn derive_sdata(input: proc_macro::TokenStream) -> proc_macro::TokenStream {
     let input = syn::parse_macro_input!(input as syn::DeriveInput);
 
