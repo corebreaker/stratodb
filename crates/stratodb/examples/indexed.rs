@@ -1,13 +1,13 @@
 //! Typed entities and secondary indexes, declared with `#[derive(SData)]` and
-//! `#[sdata(index(...))]`.
+//! `#[strato(index(...))]`.
 //!
 //! Run with: `cargo run -p stratodb --example indexed --features derive`
 
 use stratodb::{data::Scalar, SData, SdbResult, StratoDb};
 
 #[derive(SData, Debug)]
-#[sdata(index(name = "by_team", columns(team)))]
-#[sdata(index(name = "by_email", columns(email), unique))]
+#[strato(index(name = "by_team", columns(team)))]
+#[strato(index(name = "by_email", columns(email), unique))]
 struct Member {
     name:  String,
     team:  String,

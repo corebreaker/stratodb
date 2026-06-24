@@ -1,4 +1,4 @@
-//! Generates the `SIndexed` impl from a struct's `#[sdata(index(...))]` attrs.
+//! Generates the `SIndexed` impl from a struct's `#[strato(index(...))]` attrs.
 
 use super::IndexAttr;
 use proc_macro2::TokenStream as TokenStream2;

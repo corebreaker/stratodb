@@ -16,7 +16,7 @@
 //! named after the active variant). v1 supports structs with named fields and
 //! enums; tuple/unit structs and generics are reported as errors.
 //!
-//! A struct may also declare secondary indexes with `#[sdata(index(...))]`,
+//! A struct may also declare secondary indexes with `#[strato(index(...))]`,
 //! generating an [`SIndexed`](../stratodb/index/trait.SIndexed.html) impl (see
 //! [`index_attr`]).
 
@@ -31,9 +31,9 @@ mod sdata_impl;
 
 /// Derives [`SData`] for a struct with named fields or an enum.
 ///
-/// Structs may carry `#[sdata(index(...))]` attributes to declare secondary
+/// Structs may carry `#[strato(index(...))]` attributes to declare secondary
 /// indexes (see [`index_attr`]).
-#[proc_macro_derive(SData, attributes(sdata))]
+#[proc_macro_derive(SData, attributes(strato))]
 pub fn derive_sdata(input: proc_macro::TokenStream) -> proc_macro::TokenStream {
     let input = syn::parse_macro_input!(input as syn::DeriveInput);
 

@@ -27,7 +27,7 @@ pub(super) fn expand_macro(input: DeriveInput) -> SynResult<TokenStream2> {
         if let Some(index) = indexes.first() {
             return Err(Error::new(
                 index.name.span(),
-                "#[sdata(index(...))] is only supported on structs",
+                "#[strato(index(...))] is only supported on structs",
             ));
         }
 

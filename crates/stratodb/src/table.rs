@@ -104,7 +104,7 @@ impl Table {
         Ok(())
     }
 
-    /// Registers every index that `T` declares (via `#[sdata(index(...))]`),
+    /// Registers every index that `T` declares (via `#[strato(index(...))]`),
     /// scoping each to `pattern`. A shorthand for calling [`create_index`] for each
     /// of [`T::index_defs`](SIndexed::index_defs); each is idempotent and
     /// back-filled.

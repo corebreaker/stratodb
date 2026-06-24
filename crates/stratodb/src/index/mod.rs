@@ -3,7 +3,7 @@
 //! Order-preserving key encoding, index definitions and the `$metadata` registry,
 //! write-time maintenance, exact/prefix queries with direction, and unique
 //! enforcement. Types declare their indexes via [`SIndexed`] (from
-//! `#[sdata(index(...))]`).
+//! `#[strato(index(...))]`).
 
 mod definitions;
 mod id;

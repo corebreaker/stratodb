@@ -3,7 +3,7 @@
 use super::IndexDef;
 
 /// A type that declares secondary indexes, via `#[derive(SData)]`'s
-/// `#[sdata(index(...))]` attributes.
+/// `#[strato(index(...))]` attributes.
 ///
 /// The attributes fix each index's **schema** — its name, columns (in priority
 /// order, each ASC or DESC) and uniqueness. [`index_defs`](SIndexed::index_defs)

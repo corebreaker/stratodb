@@ -66,9 +66,9 @@ fn find_returns_typed_entities() {
 }
 
 #[derive(SData, Debug, PartialEq)]
-#[sdata(index(name = "people_by_age", columns(age)))]
-#[sdata(index(name = "people_by_name", columns(name), unique))]
-#[sdata(index(name = "people_by_age_name", columns(age, name desc)))]
+#[strato(index(name = "people_by_age", columns(age)))]
+#[strato(index(name = "people_by_name", columns(name), unique))]
+#[strato(index(name = "people_by_age_name", columns(age, name desc)))]
 struct Person {
     age:  i32,
     name: String,
@@ -161,9 +161,9 @@ fn derived_index_attributes_declare_and_create() {
 }
 
 #[derive(SData, Debug, PartialEq)]
-#[sdata(index(name = "by_dept", columns(dept)))]
-#[sdata(index(name = "by_dept_salary", columns(dept, salary desc)))]
-#[sdata(index(name = "by_email", columns(email), unique))]
+#[strato(index(name = "by_dept", columns(dept)))]
+#[strato(index(name = "by_dept_salary", columns(dept, salary desc)))]
+#[strato(index(name = "by_email", columns(email), unique))]
 struct Employee {
     dept:   String,
     salary: i64,

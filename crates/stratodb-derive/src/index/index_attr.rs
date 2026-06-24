@@ -1,9 +1,9 @@
-//! Parsing for the `#[sdata(index(...))]` attribute.
+//! Parsing for the `#[strato(index(...))]` attribute.
 //!
 //! Each occurrence on a struct declares one index:
 //!
 //! ```ignore
-//! #[sdata(index(name = "by_age_name", columns(age, name desc), unique))]
+//! #[strato(index(name = "by_age_name", columns(age, name desc), unique))]
 //! ```
 //!
 //! `name` and a non-empty `columns(...)` list are required; `unique` is an
@@ -31,12 +31,12 @@ pub(crate) struct IndexAttr {
 
 impl Parse for IndexAttr {
     fn parse(input: ParseStream) -> SynResult<Self> {
-        // `input` is the body of `sdata(...)`, e.g. `index(name = "x", columns(a), unique)`.
+        // `input` is the body of `strato(...)`, e.g. `index(name = "x", columns(a), unique)`.
         let keyword = input.parse::<Ident>()?;
         if keyword != "index" {
             return Err(Error::new(
                 keyword.span(),
-                "unsupported `#[sdata(...)]` attribute; expected `index(...)`",
+                "unsupported `#[strato(...)]` attribute; expected `index(...)`",
             ));
         }
 
@@ -69,11 +69,11 @@ impl Parse for IndexAttr {
     }
 }
 
-/// Parses every `#[sdata(index(...))]` declaration from `attrs`.
+/// Parses every `#[strato(index(...))]` declaration from `attrs`.
 pub(crate) fn index_attrs(attrs: &[Attribute]) -> SynResult<Vec<IndexAttr>> {
     attrs
         .iter()
-        .filter(|attr| attr.path().is_ident("sdata"))
+        .filter(|attr| attr.path().is_ident("strato"))
         .map(|attr| attr.parse_args::<IndexAttr>())
         .collect()
 }
