@@ -12,16 +12,20 @@
 //! composite fields as the nested accessor — uniformly, since the macro cannot
 //! tell scalars from composites by type alone.
 //!
-//! v1 supports structs with named fields only. Enums, tuple/unit structs,
-//! generics and `#[sdata(...)]` attributes are reported as errors for now.
+//! Enums derive too: they shred **externally tagged** (an object with one field
+//! named after the active variant). v1 supports structs with named fields and
+//! enums; tuple/unit structs, generics and `#[sdata(...)]` attributes are
+//! reported as errors for now.
 
+mod desc;
+mod enum_data;
 mod expand_macro;
 mod field_parts;
 mod named_fields;
 mod refs;
 mod sdata_impl;
 
-/// Derives [`SData`] for a struct with named fields.
+/// Derives [`SData`] for a struct with named fields or an enum.
 #[proc_macro_derive(SData)]
 pub fn derive_sdata(input: proc_macro::TokenStream) -> proc_macro::TokenStream {
     let input = syn::parse_macro_input!(input as syn::DeriveInput);
