@@ -1,11 +1,12 @@
 //! Opaque read transaction.
 
 use crate::{
-    access::{ReadCursor, Reader},
+    access::{ReadCursor, Reader, Rooted},
     cache::PathCache,
     data::{refs::SRef, SData, SValue, Scalar},
     engine::{self, TableKey, TableValue},
     error::{SdbError, SdbResult},
+    index::{registry, IndexId},
     node::{Node, NodeKind},
     path::{SPath, Segment},
     tree,
@@ -88,6 +89,55 @@ impl ReadTxn {
         let base = SPath::parse(path)?;
 
         T::load(&ReadCursor::new(self), &base)
+    }
+
+    /// Finds the entities an index points at for an exact match on `values`,
+    /// recomposing each as a `T`.
+    ///
+    /// `values` gives one scalar per index column, in the index's column order —
+    /// the full key, so this is an exact (equality) lookup on every column. The
+    /// results are returned in index order (ascending by the encoded key, honoring
+    /// each column's direction). Errors with [`SdbError::IndexNotFound`] for an
+    /// unknown index and [`SdbError::IndexArity`] for the wrong number of values.
+    pub fn find<T: SData>(&self, index: &str, values: &[Scalar]) -> SdbResult<Vec<T>> {
+        let entry = {
+            let meta = self.txn.open_table(engine::META_TABLE)?;
+
+            registry::lookup(&meta, &self.table, index)?
+        }
+        .ok_or_else(|| SdbError::IndexNotFound {
+            index: index.to_string(),
+        })?;
+
+        let def = entry.def();
+        if values.len() != def.columns().len() {
+            return Err(SdbError::IndexArity {
+                index:    index.to_string(),
+                expected: def.columns().len(),
+                got:      values.len(),
+            });
+        }
+
+        let id = entry.id();
+        let cols = def.encode_columns(values);
+
+        let Some(table) = self.open()? else {
+            return Ok(Vec::new());
+        };
+
+        let entities = if def.unique() {
+            unique_match(&table, id, cols)?
+        } else {
+            duplicate_matches(&table, id, cols)?
+        };
+
+        // Each match is addressed by its (stable) key; re-root a reader there so
+        // the path-based loader recomposes the entity from its own subtree.
+        let cursor = ReadCursor::new(self);
+        entities
+            .into_iter()
+            .map(|entity| T::load(&Rooted::new(&cursor, entity), &SPath::root()))
+            .collect()
     }
 
     // -- resolution (cached) and node-level reads used by `ReadCursor` --
@@ -200,4 +250,50 @@ impl ReadTxn {
 
         tree::object_keys(&table, key)
     }
+}
+
+/// The single entity a unique index stores for `cols` (in the entry's value), or
+/// none if there is no such entry.
+fn unique_match(table: &ReadOnlyTable<TableKey, TableValue>, id: IndexId, cols: Vec<u8>) -> SdbResult<Vec<Skey>> {
+    let key = TableKey::Index {
+        id,
+        cols,
+        entity: None,
+    };
+
+    match table.get(&key)? {
+        Some(guard) => match guard.value() {
+            TableValue::Skey(entity) => Ok(vec![entity]),
+            _ => Err(SdbError::Corrupt("unique index entry without an entity key".into())),
+        },
+        None => Ok(Vec::new()),
+    }
+}
+
+/// Every entity a non-unique index stores for `cols` (each in its entry's key,
+/// after the columns). Scans the `[cols·min_entity, cols·max_entity]` key range.
+fn duplicate_matches(table: &ReadOnlyTable<TableKey, TableValue>, id: IndexId, cols: Vec<u8>) -> SdbResult<Vec<Skey>> {
+    let low = TableKey::Index {
+        id,
+        cols: cols.clone(),
+        entity: Some(Skey::from_bytes([0x00; 16])),
+    };
+    let high = TableKey::Index {
+        id,
+        cols,
+        entity: Some(Skey::from_bytes([0xFF; 16])),
+    };
+
+    let mut entities = Vec::new();
+    for item in table.range(low..=high)? {
+        let (key, _) = item?;
+        if let TableKey::Index {
+            entity: Some(entity), ..
+        } = key.value()
+        {
+            entities.push(entity);
+        }
+    }
+
+    Ok(entities)
 }

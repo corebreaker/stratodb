@@ -90,6 +90,17 @@ impl RegistryRepository {
         Ok(entry)
     }
 
+    /// Returns every index registered on `table`, in registration order.
+    pub(crate) fn for_table<T: ReadableTable<&'static str, &'static [u8]>>(
+        meta: &T,
+        table: &str,
+    ) -> SdbResult<Vec<IndexEntry>> {
+        let registry = Self::load(meta)?;
+        let entries = registry.entries.into_iter().filter(|e| e.table() == table).collect();
+
+        Ok(entries)
+    }
+
     pub(super) fn create(meta: &mut MetaTable<'_>, table: &str, def: &IndexDef) -> SdbResult<IndexId> {
         let mut registry = Self::load(meta)?;
         let entry = registry

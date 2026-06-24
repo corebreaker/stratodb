@@ -145,6 +145,46 @@ pub(crate) fn object_keys<T: ReadableTable<TableKey, TableValue>>(t: &T, key: Sk
     }
 }
 
+/// Returns the child keys of the container node `key`, in node order (object
+/// fields sorted by name, list elements by position). A leaf or a missing node
+/// has no children. Used to expand an index pattern's `*` over every child.
+pub(crate) fn children<T: ReadableTable<TableKey, TableValue>>(t: &T, key: Skey) -> SdbResult<Vec<Skey>> {
+    match read_node(t, key)? {
+        Some(Node::Object(map)) => Ok(map.into_values().collect()),
+        Some(Node::List(items)) => Ok(items),
+        Some(Node::Leaf(_)) | None => Ok(Vec::new()),
+    }
+}
+
+/// Resolves `rel` starting from `base` rather than the root, returning the key it
+/// lands on, or `None` if any segment along the way is absent. Index maintenance
+/// uses this to read an entity's column values relative to the entity's own key.
+pub(crate) fn resolve_from<T: ReadableTable<TableKey, TableValue>>(
+    t: &T,
+    base: Skey,
+    rel: &SPath,
+) -> SdbResult<Option<Skey>> {
+    let mut key = base;
+    for seg in rel.segments() {
+        match child_key(t, key, seg)? {
+            Some(child) => key = child,
+            None => return Ok(None),
+        }
+    }
+
+    Ok(Some(key))
+}
+
+/// Reads the scalar at leaf node `key`, or `None` if `key` is missing or is not a
+/// leaf. Unlike [`scalar_at`], a container is not an error — an index column that
+/// points at a non-leaf simply has no scalar (it indexes as `Null`).
+pub(crate) fn leaf_scalar_opt<T: ReadableTable<TableKey, TableValue>>(t: &T, key: Skey) -> SdbResult<Option<Scalar>> {
+    match read_node(t, key)? {
+        Some(Node::Leaf(scalar)) => Ok(Some(scalar)),
+        _ => Ok(None),
+    }
+}
+
 // --------------------------------------------------------------------------
 // Low-level writes
 // --------------------------------------------------------------------------

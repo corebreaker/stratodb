@@ -71,6 +71,24 @@ pub enum SdbError {
         index: String,
     },
 
+    /// A query referenced an index that is not registered on the table.
+    #[error("index not found: {index}")]
+    IndexNotFound {
+        /// The index name that was requested.
+        index: String,
+    },
+
+    /// An index query supplied the wrong number of column values.
+    #[error("index '{index}' takes {expected} column value(s), got {got}")]
+    IndexArity {
+        /// The index being queried.
+        index:    String,
+        /// The number of columns the index has.
+        expected: usize,
+        /// The number of values supplied.
+        got:      usize,
+    },
+
     /// The on-disk format/schema does not match this build.
     #[error("schema mismatch: {0}")]
     SchemaMismatch(String),

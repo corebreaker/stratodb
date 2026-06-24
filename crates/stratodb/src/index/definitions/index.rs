@@ -1,7 +1,9 @@
 use super::{misc::read_string, Direction, IndexColumn};
 use crate::{
     codec::{self, Reader},
-    error::{SdbError, SdbResult},
+    data::Scalar,
+    error::SdbResult,
+    index::ordered,
     path::SPath,
 };
 
@@ -66,6 +68,19 @@ impl IndexDef {
             columns,
             unique,
         })
+    }
+
+    /// Encodes `values` (one per column, in column order) into the order-preserving
+    /// byte prefix an index key starts with, applying each column's direction.
+    /// Shared by write-time maintenance (values read from an entity) and queries
+    /// (values supplied by the caller).
+    pub(crate) fn encode_columns(&self, values: &[Scalar]) -> Vec<u8> {
+        let mut cols = Vec::new();
+        for (value, column) in values.iter().zip(&self.columns) {
+            ordered::encode_scalar(&mut cols, value, column.direction() == Direction::Desc);
+        }
+
+        cols
     }
 
     pub fn name(&self) -> &str {

@@ -22,3 +22,11 @@ pub(crate) fn lookup<T: ReadableTable<&'static str, &'static [u8]>>(
 ) -> SdbResult<Option<IndexEntry>> {
     RegistryRepository::lookup(meta, table, name)
 }
+
+/// Returns every index registered on `table`.
+pub(crate) fn for_table<T: ReadableTable<&'static str, &'static [u8]>>(
+    meta: &T,
+    table: &str,
+) -> SdbResult<Vec<IndexEntry>> {
+    RegistryRepository::for_table(meta, table)
+}

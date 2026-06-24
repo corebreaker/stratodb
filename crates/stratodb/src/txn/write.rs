@@ -4,22 +4,33 @@ use crate::{
     access::{Reader, WriteCursor, Writer},
     data::{refs::SMut, SData, Scalar, SValue},
     db::DbInner,
-    engine,
+    engine::{self, TableKey, TableValue},
     error::{SdbError, SdbResult},
+    index::{
+        maintenance,
+        registry::{self, IndexEntry},
+    },
     node::NodeKind,
     path::{SPath, Segment},
     tree,
     Skey,
 };
 
-use redb::WriteTransaction;
-use std::sync::{atomic::Ordering, Arc};
+use redb::{Table, WriteTransaction};
+use std::sync::{atomic::Ordering, Arc, OnceLock};
+
+/// The writable engine table holding this table's nodes and index entries.
+type DataTable<'txn> = Table<'txn, TableKey, TableValue>;
 
 /// A read-write transaction. Changes are durable only after [`WriteTxn::commit`].
 pub struct WriteTxn {
-    txn:   WriteTransaction,
-    table: String,
-    inner: Arc<DbInner>,
+    txn:     WriteTransaction,
+    table:   String,
+    inner:   Arc<DbInner>,
+    /// This table's indexes, loaded from `$metadata` on first mutation and reused
+    /// for the rest of the transaction (the set cannot change mid-transaction).
+    /// `OnceLock` rather than `OnceCell` so the transaction stays `Sync`.
+    indexes: OnceLock<Vec<IndexEntry>>,
 }
 
 impl WriteTxn {
@@ -28,6 +39,7 @@ impl WriteTxn {
             txn,
             table,
             inner,
+            indexes: OnceLock::new(),
         }
     }
 
@@ -39,9 +51,8 @@ impl WriteTxn {
     /// Stores a raw scalar at `path`, replacing any existing subtree there.
     pub fn put_scalar(&self, path: &str, scalar: Scalar) -> SdbResult<()> {
         let path = SPath::parse(path)?;
-        let mut table = self.txn.open_table(engine::data_def(&self.table))?;
 
-        tree::put_scalar(&mut table, &path, scalar)
+        self.put_scalar_path(&path, scalar)
     }
 
     /// Decomposes and stores a whole `value` at `path`, replacing any subtree there.
@@ -56,9 +67,8 @@ impl WriteTxn {
     /// Removes the subtree at `path`, returning whether anything was removed.
     pub fn remove(&self, path: &str) -> SdbResult<bool> {
         let path = SPath::parse(path)?;
-        let mut table = self.txn.open_table(engine::data_def(&self.table))?;
 
-        tree::remove_path(&mut table, &path)
+        self.remove_path_at(&path)
     }
 
     /// Reads the value at `path` within this transaction, decoded as `V`.
@@ -125,6 +135,42 @@ impl WriteTxn {
         drop(self.txn);
     }
 
+    // -- index maintenance --
+
+    /// This table's indexes, loaded once and cached for the transaction.
+    fn indexes(&self) -> SdbResult<&[IndexEntry]> {
+        if let Some(indexes) = self.indexes.get() {
+            return Ok(indexes);
+        }
+
+        let loaded = {
+            let meta = self.txn.open_table(engine::META_TABLE)?;
+
+            registry::for_table(&meta, &self.table)?
+        };
+
+        Ok(self.indexes.get_or_init(|| loaded))
+    }
+
+    /// Runs a mutation at `scope`, keeping the table's indexes consistent: the
+    /// entities `scope` could affect are de-indexed before the change and
+    /// re-indexed after it. Tables with no indexes take a direct, zero-overhead
+    /// path.
+    fn reindex_around<R>(&self, scope: &SPath, apply: impl FnOnce(&mut DataTable<'_>) -> SdbResult<R>) -> SdbResult<R> {
+        let indexes = self.indexes()?;
+        let mut table = self.txn.open_table(engine::data_def(&self.table))?;
+
+        if indexes.is_empty() {
+            return apply(&mut table);
+        }
+
+        maintenance::delete(&mut table, indexes, scope)?;
+        let result = apply(&mut table)?;
+        maintenance::insert(&mut table, indexes, scope)?;
+
+        Ok(result)
+    }
+
     // -- node-level access used by `WriteCursor` (the write table is opened per call) --
 
     pub(crate) fn lookup_path(&self, path: &SPath) -> SdbResult<Option<Skey>> {
@@ -170,17 +216,15 @@ impl WriteTxn {
     }
 
     pub(crate) fn put_scalar_path(&self, path: &SPath, scalar: Scalar) -> SdbResult<()> {
-        let mut table = self.txn.open_table(engine::data_def(&self.table))?;
-
-        tree::put_scalar(&mut table, path, scalar)
+        self.reindex_around(path, |table| tree::put_scalar(table, path, scalar))
     }
 
     pub(crate) fn ensure_container_at(&self, path: &SPath, list: bool) -> SdbResult<Skey> {
-        let mut table = self.txn.open_table(engine::data_def(&self.table))?;
-
-        tree::ensure_container(&mut table, path, list)
+        self.reindex_around(path, |table| tree::ensure_container(table, path, list))
     }
 
+    // List reordering preserves every element's key and column values, so no index
+    // entry can change; these skip index maintenance.
     pub(crate) fn list_move_at(&self, list_key: Skey, from: usize, to: usize) -> SdbResult<()> {
         let mut table = self.txn.open_table(engine::data_def(&self.table))?;
 
@@ -193,15 +237,11 @@ impl WriteTxn {
         tree::list_swap(&mut table, list_key, i, j)
     }
 
-    pub(crate) fn clear_children_at(&self, key: Skey) -> SdbResult<()> {
-        let mut table = self.txn.open_table(engine::data_def(&self.table))?;
-
-        tree::clear_children(&mut table, key)
+    pub(crate) fn clear_children_at(&self, path: &SPath, key: Skey) -> SdbResult<()> {
+        self.reindex_around(path, |table| tree::clear_children(table, key))
     }
 
     pub(crate) fn remove_path_at(&self, path: &SPath) -> SdbResult<bool> {
-        let mut table = self.txn.open_table(engine::data_def(&self.table))?;
-
-        tree::remove_path(&mut table, path)
+        self.reindex_around(path, |table| tree::remove_path(table, path))
     }
 }

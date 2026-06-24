@@ -30,8 +30,9 @@ pub trait Writer: Reader {
     /// Swaps the elements at `i` and `j` within list node `list_key` (keys stable).
     fn list_swap(&self, list_key: Skey, i: usize, j: usize) -> SdbResult<()>;
 
-    /// Removes every child of container node `key`, leaving it empty.
-    fn clear_children(&self, key: Skey) -> SdbResult<()>;
+    /// Removes every child of the container at `path` (node `key`), leaving it
+    /// empty. `path` lets index maintenance de-index the cleared entities.
+    fn clear_children(&self, path: &SPath, key: Skey) -> SdbResult<()>;
 }
 
 impl Reader for Box<dyn Writer + '_> {
@@ -115,10 +116,10 @@ impl Writer for Box<dyn Writer + '_> {
         this.list_swap(list_key, i, j)
     }
 
-    fn clear_children(&self, key: Skey) -> SdbResult<()> {
+    fn clear_children(&self, path: &SPath, key: Skey) -> SdbResult<()> {
         let this = Box::as_ref(self);
 
-        this.clear_children(key)
+        this.clear_children(path, key)
     }
 }
 
@@ -203,10 +204,10 @@ impl Writer for Arc<dyn Writer + '_> {
         this.list_swap(list_key, i, j)
     }
 
-    fn clear_children(&self, key: Skey) -> SdbResult<()> {
+    fn clear_children(&self, path: &SPath, key: Skey) -> SdbResult<()> {
         let this = Arc::as_ref(self);
 
-        this.clear_children(key)
+        this.clear_children(path, key)
     }
 }
 
@@ -275,7 +276,7 @@ impl Writer for WriteCursor<'_> {
         self.txn.list_swap_at(list_key, i, j)
     }
 
-    fn clear_children(&self, key: Skey) -> SdbResult<()> {
-        self.txn.clear_children_at(key)
+    fn clear_children(&self, path: &SPath, key: Skey) -> SdbResult<()> {
+        self.txn.clear_children_at(path, key)
     }
 }

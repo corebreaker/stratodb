@@ -330,7 +330,7 @@ impl<'t, T: SData> SeqMut<'t, T> {
 
     /// Removes every element, leaving an empty list.
     pub fn clear(&self) -> SdbResult<()> {
-        self.writer.clear_children(self.key)
+        self.writer.clear_children(&self.base, self.key)
     }
 
     /// Keeps only the elements for which `keep` returns `true`. `keep` is called

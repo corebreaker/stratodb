@@ -6,14 +6,11 @@
 
 mod definitions;
 mod id;
+mod ordered;
+mod pattern;
 
+pub(crate) mod maintenance;
 pub(crate) mod registry;
-
-// The codec is fully exercised by its own tests; its first non-test caller
-// arrives with index maintenance (a later milestone-3 sub-step). Remove this
-// allow once it is wired in.
-#[allow(dead_code)]
-pub(crate) mod ordered;
 
 pub(crate) use self::id::IndexId;
 

@@ -283,7 +283,7 @@ impl<'t, T: SData> MapMut<'t, T> {
 
     /// Removes every entry, leaving an empty map.
     pub fn clear(&self) -> SdbResult<()> {
-        self.writer.clear_children(self.key)
+        self.writer.clear_children(&self.base, self.key)
     }
 
     /// Keeps only the entries for which `keep` returns `true`. `keep` is called
@@ -307,7 +307,7 @@ impl<'t, T: SData> MapMut<'t, T> {
             drained.insert(name, value);
         }
 
-        self.writer.clear_children(self.key)?;
+        self.writer.clear_children(&self.base, self.key)?;
 
         Ok(drained)
     }

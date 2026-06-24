@@ -6,8 +6,9 @@
 //! node's primary key via `key()` (resolved eagerly when the accessor is built).
 
 mod reader;
+mod rooted;
 mod writer;
 
-pub(crate) use self::{reader::ReadCursor, writer::WriteCursor};
+pub(crate) use self::{reader::ReadCursor, rooted::Rooted, writer::WriteCursor};
 
 pub use self::{reader::Reader, writer::Writer};
