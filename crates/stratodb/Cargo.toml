@@ -1,0 +1,18 @@
+[package]
+name = "stratodb"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "A typed, transactional, indexed document store layered over an embedded key-value engine."
+
+[dependencies]
+chrono = "0.4"
+redb = "4.1"
+thiserror = "2.0"
+uuid = { version = "1.23", features = ["v7"] }
+
+stratodb-derive = { workspace = true }
+
+[dev-dependencies]
+tempfile = "3.27"
