@@ -44,6 +44,9 @@ pub trait Reader {
 
     /// The length of list node `key`.
     fn len(&self, key: Skey) -> SdbResult<usize>;
+
+    /// The field names of object node `key`, in sorted order.
+    fn object_keys(&self, key: Skey) -> SdbResult<Vec<String>>;
 }
 
 impl Reader for Box<dyn Reader + '_> {
@@ -87,6 +90,12 @@ impl Reader for Box<dyn Reader + '_> {
         let this = Box::as_ref(self);
 
         this.len(key)
+    }
+
+    fn object_keys(&self, key: Skey) -> SdbResult<Vec<String>> {
+        let this = Box::as_ref(self);
+
+        this.object_keys(key)
     }
 }
 
@@ -132,6 +141,12 @@ impl Reader for Arc<dyn Reader + '_> {
 
         this.len(key)
     }
+
+    fn object_keys(&self, key: Skey) -> SdbResult<Vec<String>> {
+        let this = Arc::as_ref(self);
+
+        this.object_keys(key)
+    }
 }
 
 /// A copyable read cursor bound to a read transaction.
@@ -175,5 +190,9 @@ impl Reader for ReadCursor<'_> {
 
     fn len(&self, key: Skey) -> SdbResult<usize> {
         self.txn.lookup_len(key)
+    }
+
+    fn object_keys(&self, key: Skey) -> SdbResult<Vec<String>> {
+        self.txn.lookup_object_keys(key)
     }
 }

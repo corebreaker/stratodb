@@ -192,4 +192,12 @@ impl ReadTxn {
 
         tree::list_len(&table, key)
     }
+
+    pub(crate) fn lookup_object_keys(&self, key: Skey) -> SdbResult<Vec<String>> {
+        let table = self
+            .open()?
+            .ok_or_else(|| SdbError::Corrupt("read on a missing table".into()))?;
+
+        tree::object_keys(&table, key)
+    }
 }

@@ -163,6 +163,12 @@ impl WriteTxn {
         tree::list_len(&table, key)
     }
 
+    pub(crate) fn lookup_object_keys(&self, key: Skey) -> SdbResult<Vec<String>> {
+        let table = self.txn.open_table(engine::data_def(&self.table))?;
+
+        tree::object_keys(&table, key)
+    }
+
     pub(crate) fn put_scalar_path(&self, path: &SPath, scalar: Scalar) -> SdbResult<()> {
         let mut table = self.txn.open_table(engine::data_def(&self.table))?;
 

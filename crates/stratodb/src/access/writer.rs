@@ -70,6 +70,12 @@ impl Reader for Box<dyn Writer + '_> {
 
         this.len(key)
     }
+
+    fn object_keys(&self, key: Skey) -> SdbResult<Vec<String>> {
+        let this = Box::as_ref(self);
+
+        this.object_keys(key)
+    }
 }
 
 impl Writer for Box<dyn Writer + '_> {
@@ -140,6 +146,12 @@ impl Reader for Arc<dyn Writer + '_> {
 
         this.len(key)
     }
+
+    fn object_keys(&self, key: Skey) -> SdbResult<Vec<String>> {
+        let this = Arc::as_ref(self);
+
+        this.object_keys(key)
+    }
 }
 
 impl Writer for Arc<dyn Writer + '_> {
@@ -205,6 +217,10 @@ impl Reader for WriteCursor<'_> {
 
     fn len(&self, key: Skey) -> SdbResult<usize> {
         self.txn.lookup_len(key)
+    }
+
+    fn object_keys(&self, key: Skey) -> SdbResult<Vec<String>> {
+        self.txn.lookup_object_keys(key)
     }
 }
 

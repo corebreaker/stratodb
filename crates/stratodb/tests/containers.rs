@@ -1,8 +1,14 @@
 //! Container `SData` impls: `Vec`, `Option`, and the packed `Bytes` newtype,
 //! exercised through both the value API (`store`/`load`) and the accessors.
 
-use stratodb::data::{Bytes, OptRef, Seq, SeqMut};
-use stratodb::{NodeKind, StratoDb, Table};
+use stratodb::{
+    data::{Bytes, Map, MapMut, OptRef, Seq, SeqMut},
+    NodeKind,
+    StratoDb,
+    Table,
+};
+
+use std::collections::BTreeMap;
 
 fn table() -> (tempfile::TempDir, Table) {
     let dir = tempfile::tempdir().expect("tempdir");
@@ -142,4 +148,72 @@ fn path_cache_stays_coherent_across_writes() {
 
     // The older snapshot still resolves to its own value (cache keyed by generation).
     assert_eq!(r1.get::<u32>("a/x").unwrap(), Some(1));
+}
+
+#[test]
+fn map_roundtrips_and_is_accessible() {
+    let (_dir, table) = table();
+
+    let mut ages = BTreeMap::new();
+    ages.insert("alice".to_string(), 30i32);
+    ages.insert("bob".to_string(), 41i32);
+
+    let w = table.write().unwrap();
+    w.store("ages", &ages).unwrap();
+    w.commit().unwrap();
+
+    let r = table.read().unwrap();
+    assert_eq!(r.load::<BTreeMap<String, i32>>("ages").unwrap(), ages);
+
+    let map = r.fetch::<Map<i32>>("ages").unwrap();
+    assert_eq!(map.len().unwrap(), 2);
+    assert_eq!(map.keys().unwrap(), vec!["alice".to_string(), "bob".to_string()]);
+    assert_eq!(map.get("bob").unwrap().unwrap().get().unwrap(), 41);
+    assert!(map.get("carol").unwrap().is_none());
+    assert!(map.contains_key("alice").unwrap());
+    assert!(!map.contains_key("carol").unwrap());
+
+    // Homogeneity: each value is a node reachable by raw path.
+    assert_eq!(r.get::<i32>("ages/alice").unwrap(), Some(30));
+}
+
+#[test]
+fn empty_map_materializes_an_object_node() {
+    let (_dir, table) = table();
+
+    let w = table.write().unwrap();
+    w.store("empty", &BTreeMap::<String, i32>::new()).unwrap();
+    w.commit().unwrap();
+
+    let r = table.read().unwrap();
+    assert_eq!(r.load::<BTreeMap<String, i32>>("empty").unwrap(), BTreeMap::new());
+    assert_eq!(r.kind("empty").unwrap(), Some(NodeKind::Object));
+
+    // The accessor works even though the map is empty.
+    let map = r.fetch::<Map<i32>>("empty").unwrap();
+    assert!(map.is_empty().unwrap());
+}
+
+#[test]
+fn map_mut_insert_and_remove() {
+    let (_dir, table) = table();
+
+    let w = table.write().unwrap();
+    let mut initial = BTreeMap::new();
+    initial.insert("a".to_string(), 1i32);
+    w.store("m", &initial).unwrap();
+    {
+        let m = w.fetch_mut::<MapMut<i32>>("m").unwrap();
+        m.insert("b", &2).unwrap(); // {a: 1, b: 2}
+        m.insert("a", &10).unwrap(); // replace -> {a: 10, b: 2}
+        assert!(m.remove("a").unwrap()); // {b: 2}
+        assert!(!m.remove("absent").unwrap());
+        assert_eq!(m.get("b").unwrap().unwrap().get().unwrap(), 2);
+    }
+    w.commit().unwrap();
+
+    let r = table.read().unwrap();
+    let mut expected = BTreeMap::new();
+    expected.insert("b".to_string(), 2i32);
+    assert_eq!(r.load::<BTreeMap<String, i32>>("m").unwrap(), expected);
 }

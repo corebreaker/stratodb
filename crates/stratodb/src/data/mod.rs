@@ -6,6 +6,7 @@ mod definition;
 mod identifiable;
 mod leaf_mut;
 mod leaf_ref;
+mod map;
 mod opt;
 mod scalar;
 mod seq;
@@ -16,6 +17,7 @@ mod value;
 pub use self::{
     bytes::Bytes,
     definition::SData,
+    map::{Map, MapMut},
     opt::{OptMut, OptRef},
     scalar::Scalar,
     seq::{Seq, SeqMut},

@@ -133,6 +133,18 @@ pub(crate) fn list_len<T: ReadableTable<TableKey, TableValue>>(t: &T, key: Skey)
     }
 }
 
+/// Returns the field names of the object node `key`, in sorted (`BTreeMap`) order.
+pub(crate) fn object_keys<T: ReadableTable<TableKey, TableValue>>(t: &T, key: Skey) -> SdbResult<Vec<String>> {
+    match read_node(t, key)? {
+        Some(Node::Object(map)) => Ok(map.into_keys().collect()),
+        Some(other) => Err(SdbError::Corrupt(format!(
+            "node {key} is a {}, expected an object",
+            other.kind().as_str()
+        ))),
+        None => Err(SdbError::Corrupt(format!("no node for key {key}"))),
+    }
+}
+
 // --------------------------------------------------------------------------
 // Low-level writes
 // --------------------------------------------------------------------------
