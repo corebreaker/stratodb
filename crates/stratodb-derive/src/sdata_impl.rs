@@ -9,11 +9,12 @@ pub(crate) fn sdata_impl(name: &Ident, ref_name: &Ident, mut_name: &Ident, parts
     let store_fields = parts.iter().filter(|p| p.attrs().in_shape()).map(|p| {
         let getter = p.getter();
         let field = p.name();
-        let store = quote! {
-            ::stratodb::data::SData::store(&self.#getter, writer, &at.child_name(#field))?;
+        let store = match p.attrs().store_fn() {
+            Some(path) => quote! { #path(&self.#getter, writer, &at.child_name(#field))?; },
+            None => quote! { ::stratodb::data::SData::store(&self.#getter, writer, &at.child_name(#field))?; },
         };
 
-        match &p.attrs().skip_store_if() {
+        match p.attrs().skip_store_if() {
             Some(predicate) => quote! { if !#predicate(&self.#getter) { #store } },
             None => store,
         }
@@ -65,7 +66,11 @@ fn load_value(p: &FieldParts) -> TokenStream2 {
         return attrs.default_expr();
     }
 
-    let load_from = |name: TokenStream2| quote! { <#ty as ::stratodb::data::SData>::load(reader, &#name)? };
+    let load_fn = attrs.load_fn();
+    let load_from = |name: TokenStream2| match &load_fn {
+        Some(path) => quote! { #path(reader, &#name)? },
+        None => quote! { <#ty as ::stratodb::data::SData>::load(reader, &#name)? },
+    };
 
     // A direct read suffices unless we must look under aliases or fall back to a
     // default when the node is absent.

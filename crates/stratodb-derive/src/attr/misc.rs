@@ -1,8 +1,18 @@
-use syn::{parse::ParseStream, LitStr, Path, Result as SynResult};
+use proc_macro2::Span;
+use syn::{parse::ParseStream, Ident, LitStr, Path, PathSegment, Result as SynResult};
 
 /// Parses a string literal holding a path: `"a::b"` parses to the path `a::b`.
 pub(super) fn parse_path_lit(input: ParseStream) -> SynResult<Path> {
     input.parse::<LitStr>()?.parse()
+}
+
+/// Returns `path::seg` — `path` with `seg` appended as a final segment.
+pub(super) fn join_path(path: &Path, seg: &str) -> Path {
+    let mut joined = path.clone();
+    joined
+        .segments
+        .push(PathSegment::from(Ident::new(seg, Span::call_site())));
+    joined
 }
 
 /// Upper-cases the first character of `word`, leaving the rest unchanged.

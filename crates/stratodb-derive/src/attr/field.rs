@@ -1,6 +1,10 @@
 //! Field-level `#[strato(...)]` attributes.
 
-use super::{default::FieldDefault, misc::parse_path_lit};
+use super::{
+    default::FieldDefault,
+    misc::{join_path, parse_path_lit},
+};
+
 use syn::{parse::ParseStream, Attribute, Error, Ident, LitStr, Path, Result as SynResult, Token};
 use proc_macro2::TokenStream as TokenStream2;
 use quote::quote;
@@ -22,6 +26,12 @@ pub(crate) struct FieldAttrs {
     skip_store_if: Option<Path>,
     /// How to produce the value on load when the node is absent or skipped.
     default:       Option<FieldDefault>,
+    /// Custom store function (`store_with = "path"`) replacing the field type's `SData::store`.
+    store_with:    Option<Path>,
+    /// Custom load function (`load_with = "path"`) replacing the field type's `SData::load`.
+    load_with:     Option<Path>,
+    /// Module supplying both `store` and `load` (`with = "module"`); sugar for the two above.
+    with:          Option<Path>,
 }
 
 impl FieldAttrs {
@@ -31,7 +41,43 @@ impl FieldAttrs {
             attr.parse_args_with(|input: ParseStream| this.parse_items(input))?;
         }
 
+        this.check_conflicts()?;
         Ok(this)
+    }
+
+    /// Rejects attribute combinations that cannot both hold.
+    fn check_conflicts(&self) -> SynResult<()> {
+        // `with` already sets both sides; an explicit `store_with`/`load_with` is redundant.
+        if self.with.is_some()
+            && let Some(dup) = self.store_with.as_ref().or(self.load_with.as_ref())
+        {
+            return Err(Error::new_spanned(
+                dup,
+                "`store_with`/`load_with` cannot be combined with `with`",
+            ));
+        }
+
+        // A custom store only runs for a stored field.
+        if let Some(store) = self.store_with.as_ref().or(self.with.as_ref())
+            && (self.skip || self.skip_store)
+        {
+            return Err(Error::new_spanned(
+                store,
+                "`store_with`/`with` conflicts with `skip`/`skip_store`: the field is never stored",
+            ));
+        }
+
+        // A custom load only runs for a loaded field.
+        if let Some(load) = self.load_with.as_ref().or(self.with.as_ref())
+            && (self.skip || self.skip_load)
+        {
+            return Err(Error::new_spanned(
+                load,
+                "`load_with`/`with` conflicts with `skip`/`skip_load`: the field is never loaded",
+            ));
+        }
+
+        Ok(())
     }
 
     /// Whether the field is part of the stored shape — it drives the accessor
@@ -74,6 +120,18 @@ impl FieldAttrs {
                         FieldDefault::Trait
                     });
                 }
+                "store_with" => {
+                    input.parse::<Token![=]>()?;
+                    self.store_with = Some(parse_path_lit(input)?);
+                }
+                "load_with" => {
+                    input.parse::<Token![=]>()?;
+                    self.load_with = Some(parse_path_lit(input)?);
+                }
+                "with" => {
+                    input.parse::<Token![=]>()?;
+                    self.with = Some(parse_path_lit(input)?);
+                }
                 other => {
                     return Err(Error::new(
                         key.span(),
@@ -115,5 +173,21 @@ impl FieldAttrs {
 
     pub(crate) fn field_default(&self) -> Option<&FieldDefault> {
         self.default.as_ref()
+    }
+
+    /// The function storing the field: an explicit `store_with`, else `with`'s
+    /// `store`, else `None` to fall back to the field type's `SData::store`.
+    pub(crate) fn store_fn(&self) -> Option<Path> {
+        self.store_with
+            .clone()
+            .or_else(|| self.with.as_ref().map(|m| join_path(m, "store")))
+    }
+
+    /// The function loading the field: an explicit `load_with`, else `with`'s
+    /// `load`, else `None` to fall back to the field type's `SData::load`.
+    pub(crate) fn load_fn(&self) -> Option<Path> {
+        self.load_with
+            .clone()
+            .or_else(|| self.with.as_ref().map(|m| join_path(m, "load")))
     }
 }

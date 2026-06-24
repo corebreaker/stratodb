@@ -454,3 +454,98 @@ fn skip_store_if_omits_when_predicate_holds() {
     assert!(!r.exists("s/flags").unwrap());
     assert_eq!(r.load::<Settings>("s").unwrap().flags, 0); // refilled by default
 }
+
+mod tenths {
+    use stratodb::{
+        access::{Reader, Writer},
+        data::SData,
+        path::SPath,
+        SdbResult,
+    };
+
+    /// Stores an `f64` as its number of tenths (an `i64`) — a representation the
+    /// field's own `SData` impl would never produce.
+    pub fn store<W: Writer>(value: &f64, writer: &W, at: &SPath) -> SdbResult<()> {
+        let tenths = (*value * 10.0).round() as i64;
+        tenths.store(writer, at)
+    }
+
+    /// Recomposes the `f64` from the stored tenths.
+    pub fn load<R: Reader>(reader: &R, at: &SPath) -> SdbResult<f64> {
+        Ok(i64::load(reader, at)? as f64 / 10.0)
+    }
+}
+
+#[derive(SData, Debug, PartialEq)]
+struct Measurement {
+    label:  String,
+    #[strato(with = "tenths")]
+    amount: f64,
+}
+
+#[test]
+fn with_uses_the_custom_store_and_load() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = StratoDb::create(dir.path().join("with.stratodb")).unwrap();
+    let table = db.open_table("data").unwrap();
+
+    let m = Measurement {
+        label:  String::from("len"),
+        amount: 2.5,
+    };
+
+    let w = table.write().unwrap();
+    w.store("m", &m).unwrap();
+    w.commit().unwrap();
+
+    let r = table.read().unwrap();
+
+    // The custom representation is visible by raw path: stored as i64 tenths,
+    // which the field's plain `f64` `SData` impl would never produce.
+    assert_eq!(r.get::<i64>("m/amount").unwrap(), Some(25));
+
+    // Full roundtrip recomposes through the custom load.
+    assert_eq!(r.load::<Measurement>("m").unwrap(), m);
+}
+
+#[derive(SData, Debug, PartialEq)]
+struct Reading {
+    #[strato(store_with = "tenths::store", load_with = "tenths::load", default)]
+    value: f64,
+}
+
+#[test]
+fn store_with_and_load_with_compose_with_default() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = StratoDb::create(dir.path().join("reading.stratodb")).unwrap();
+    let table = db.open_table("data").unwrap();
+
+    let w = table.write().unwrap();
+    w.store(
+        "r",
+        &Reading {
+            value: 1.5
+        },
+    )
+    .unwrap();
+    w.commit().unwrap();
+
+    let r = table.read().unwrap();
+
+    // Separate `store_with` / `load_with` use the same custom tenths shape.
+    assert_eq!(r.get::<i64>("r/value").unwrap(), Some(15));
+    assert_eq!(
+        r.load::<Reading>("r").unwrap(),
+        Reading {
+            value: 1.5
+        }
+    );
+
+    // An absent node falls back to `default`; the custom load is never reached.
+    assert_eq!(
+        r.load::<Reading>("absent").unwrap(),
+        Reading {
+            value: 0.0
+        }
+    );
+}
