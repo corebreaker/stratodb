@@ -1,5 +1,6 @@
 //! The `rename_all` casing rule.
 
+use super::misc::{capitalize, lower_first};
 use syn::{Error, LitStr, Result as SynResult};
 
 /// A `rename_all` rule, named exactly as in Serde.
@@ -51,23 +52,5 @@ impl RenameRule {
             Self::Kebab => field.replace('_', "-"),
             Self::ScreamingKebab => field.to_ascii_uppercase().replace('_', "-"),
         }
-    }
-}
-
-/// Upper-cases the first character of `word`, leaving the rest unchanged.
-fn capitalize(word: &str) -> String {
-    let mut chars = word.chars();
-    match chars.next() {
-        Some(first) => first.to_ascii_uppercase().to_string() + chars.as_str(),
-        None => String::new(),
-    }
-}
-
-/// Lower-cases the first character of `s`, leaving the rest unchanged.
-fn lower_first(s: &str) -> String {
-    let mut chars = s.chars();
-    match chars.next() {
-        Some(first) => first.to_ascii_lowercase().to_string() + chars.as_str(),
-        None => String::new(),
     }
 }

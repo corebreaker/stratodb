@@ -5,7 +5,7 @@ use syn::Ident;
 
 /// The write accessor type, its field getters, and its `SMut`/`SIdentifiable` impls.
 pub(crate) fn mut_type(vis: &syn::Visibility, mut_name: &Ident, parts: &[FieldParts]) -> TokenStream2 {
-    let getters = parts.iter().map(|p| {
+    let getters = parts.iter().filter(|p| p.attrs().in_shape()).map(|p| {
         let setter = &p.setter();
         let ty = p.ty();
         let field = &p.name();

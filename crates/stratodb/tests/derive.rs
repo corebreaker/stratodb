@@ -317,3 +317,140 @@ fn alias_is_accepted_on_load() {
         }
     );
 }
+
+fn default_level() -> u8 {
+    7
+}
+
+fn is_zero(value: &u32) -> bool {
+    *value == 0
+}
+
+#[derive(SData, Debug, PartialEq)]
+struct Settings {
+    name:          String,
+    #[strato(skip)]
+    runtime_cache: u64,
+    #[strato(skip_store, default)]
+    derived:       String,
+    #[strato(skip_load)]
+    version:       u32,
+    #[strato(default)]
+    retries:       u32,
+    #[strato(default = "default_level")]
+    level:         u8,
+    #[strato(skip_store_if = "is_zero", default)]
+    flags:         u32,
+}
+
+#[test]
+fn skip_and_default_family_roundtrip() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = StratoDb::create(dir.path().join("settings.stratodb")).unwrap();
+    let table = db.open_table("data").unwrap();
+
+    let original = Settings {
+        name:          String::from("db"),
+        runtime_cache: 999,                       // skip -> never stored
+        derived:       String::from("ephemeral"), // skip_store -> never stored
+        version:       3,                         // skip_load -> stored, ignored on load
+        retries:       5,
+        level:         9,
+        flags:         0b101, // != 0 -> stored
+    };
+
+    let w = table.write().unwrap();
+    w.store("s", &original).unwrap();
+    w.commit().unwrap();
+
+    let r = table.read().unwrap();
+
+    // Never-stored fields leave no node; skip_load still stores.
+    assert!(!r.exists("s/runtime_cache").unwrap());
+    assert!(!r.exists("s/derived").unwrap());
+    assert_eq!(r.get::<u32>("s/version").unwrap(), Some(3));
+    assert_eq!(r.get::<u32>("s/flags").unwrap(), Some(0b101));
+
+    // The accessor exists for skip_load (it is stored) but not for skipped fields.
+    assert_eq!(
+        r.fetch::<StratoSettings>("s")
+            .unwrap()
+            .version()
+            .unwrap()
+            .get()
+            .unwrap(),
+        3
+    );
+
+    // Load drops skip / skip_load values back to their defaults.
+    assert_eq!(
+        r.load::<Settings>("s").unwrap(),
+        Settings {
+            name:          String::from("db"),
+            runtime_cache: 0,
+            derived:       String::new(),
+            version:       0,
+            retries:       5,
+            level:         9,
+            flags:         0b101,
+        }
+    );
+
+    // The descriptor omits never-stored fields.
+    assert_eq!(
+        StratoSettingsDesc::FIELDS,
+        &["name", "version", "retries", "level", "flags"]
+    );
+}
+
+#[test]
+fn defaults_fill_absent_nodes() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = StratoDb::create(dir.path().join("settings_partial.stratodb")).unwrap();
+    let table = db.open_table("data").unwrap();
+
+    // Only `name` is present; everything else is absent.
+    let w = table.write().unwrap();
+    w.put("s/name", &String::from("db")).unwrap();
+    w.commit().unwrap();
+
+    assert_eq!(
+        table.read().unwrap().load::<Settings>("s").unwrap(),
+        Settings {
+            name:          String::from("db"),
+            runtime_cache: 0,             // skip
+            derived:       String::new(), // skip_store + default
+            version:       0,             // skip_load
+            retries:       0,             // default -> Default
+            level:         7,             // default = "default_level"
+            flags:         0,             // default
+        }
+    );
+}
+
+#[test]
+fn skip_store_if_omits_when_predicate_holds() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = StratoDb::create(dir.path().join("settings_skipif.stratodb")).unwrap();
+    let table = db.open_table("data").unwrap();
+
+    let w = table.write().unwrap();
+    w.store(
+        "s",
+        &Settings {
+            name:          String::from("x"),
+            runtime_cache: 0,
+            derived:       String::new(),
+            version:       0,
+            retries:       0,
+            level:         0,
+            flags:         0, // is_zero -> not stored
+        },
+    )
+    .unwrap();
+    w.commit().unwrap();
+
+    let r = table.read().unwrap();
+    assert!(!r.exists("s/flags").unwrap());
+    assert_eq!(r.load::<Settings>("s").unwrap().flags, 0); // refilled by default
+}

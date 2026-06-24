@@ -2,7 +2,9 @@
 //! level) shared by the struct and enum code generators.
 
 mod container;
+mod default;
 mod field;
 mod rename;
+mod misc;
 
 pub(crate) use self::{container::ContainerAttrs, field::FieldAttrs};

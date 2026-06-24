@@ -2,6 +2,7 @@ use crate::{
     attr::{ContainerAttrs, FieldAttrs},
     desc::struct_desc,
     enum_data::expand_enum,
+    field_parts::FieldParts,
     index::indexed_impl,
     named_fields::named_fields,
     refs::{mut_type, ref_type},
@@ -47,7 +48,22 @@ pub(super) fn expand_macro(input: DeriveInput) -> SynResult<TokenStream2> {
         let getter = field.ident.as_ref().expect("named field has an identifier");
         let attrs = FieldAttrs::parse(&field.attrs)?;
 
-        parts.push(attrs.into_field_parts(&field.ty, getter, container.rename_all()));
+        // Stored name: an explicit `rename` wins, else `rename_all`, else the field.
+        let name = match attrs.rename() {
+            Some(rename) => rename.to_string(),
+            None => match container.rename_all() {
+                Some(rule) => rule.apply_to_field(&getter.to_string()),
+                None => getter.to_string(),
+            },
+        };
+
+        parts.push(FieldParts::new( 
+            getter,
+            format_ident!("{}_mut", getter),
+            &field.ty,
+            name,
+            attrs,
+        ));
     }
 
     let vis = &input.vis;
@@ -56,7 +72,12 @@ pub(super) fn expand_macro(input: DeriveInput) -> SynResult<TokenStream2> {
     let mut_name = format_ident!("Strato{}Mut", name);
     let desc_name = format_ident!("Strato{}Desc", name);
 
-    let field_names: Vec<String> = parts.iter().map(|p| p.name().to_string()).collect();
+    // The descriptor lists only fields that are part of the stored shape.
+    let field_names: Vec<String> = parts
+        .iter()
+        .filter(|p| p.attrs().in_shape())
+        .map(|p| p.name().to_string())
+        .collect();
 
     let sdata_impl = sdata_impl(name, &ref_name, &mut_name, &parts);
     let ref_type = ref_type(vis, &ref_name, &parts);

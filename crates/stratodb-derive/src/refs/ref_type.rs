@@ -5,7 +5,7 @@ use syn::Ident;
 
 /// The read accessor type, its field getters, and its `SRef`/`SIdentifiable` impls.
 pub(crate) fn ref_type(vis: &syn::Visibility, ref_name: &Ident, parts: &[FieldParts]) -> TokenStream2 {
-    let getters = parts.iter().map(|p| {
+    let getters = parts.iter().filter(|p| p.attrs().in_shape()).map(|p| {
         let getter = p.getter();
         let ty = p.ty();
         let field = &p.name();
