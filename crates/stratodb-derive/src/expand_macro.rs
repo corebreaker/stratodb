@@ -38,14 +38,7 @@ pub(super) fn expand_macro(input: DeriveInput) -> SynResult<TokenStream2> {
             ));
         }
 
-        if container.rename_all().is_some() {
-            return Err(Error::new(
-                input.ident.span(),
-                "#[strato(rename_all = ...)] on enums is not supported yet",
-            ));
-        }
-
-        return expand_enum(&input, data);
+        return expand_enum(&input, data, container.rename_all());
     }
 
     let fields = named_fields(&input)?;

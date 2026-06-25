@@ -696,3 +696,74 @@ fn delegated_field_exposes_the_target_types_accessor() {
         }
     );
 }
+
+#[derive(SData, Debug, PartialEq)]
+#[strato(rename_all = "snake_case")]
+enum Event {
+    Created,
+    #[strato(rename = "deleted_at")]
+    Deleted(i64),
+    #[strato(alias = "modified")]
+    Updated {
+        version: u32,
+    },
+}
+
+#[test]
+fn enum_rename_all_variant_rename_and_alias() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = StratoDb::create(dir.path().join("events.stratodb")).unwrap();
+    let table = db.open_table("data").unwrap();
+
+    let w = table.write().unwrap();
+    w.store("a", &Event::Created).unwrap();
+    w.store("b", &Event::Deleted(5)).unwrap();
+    w.store(
+        "c",
+        &Event::Updated {
+            version: 2
+        },
+    )
+    .unwrap();
+    w.commit().unwrap();
+
+    let r = table.read().unwrap();
+
+    // Stored under the cased / renamed tags, not the Rust variant names.
+    assert_eq!(r.fetch::<StratoEvent>("a").unwrap().variant().unwrap(), "created");
+    assert_eq!(r.get::<i64>("b/deleted_at").unwrap(), Some(5));
+    assert!(r.get::<i64>("b/Deleted").unwrap().is_none());
+    assert_eq!(r.get::<u32>("c/updated/version").unwrap(), Some(2));
+
+    // Roundtrips.
+    assert_eq!(r.load::<Event>("a").unwrap(), Event::Created);
+    assert_eq!(r.load::<Event>("b").unwrap(), Event::Deleted(5));
+    assert_eq!(
+        r.load::<Event>("c").unwrap(),
+        Event::Updated {
+            version: 2
+        }
+    );
+
+    // The descriptor reports the stored tags.
+    assert_eq!(StratoEventDesc::VARIANTS, &["created", "deleted_at", "updated"]);
+}
+
+#[test]
+fn enum_variant_alias_is_accepted_on_load() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = StratoDb::create(dir.path().join("events_alias.stratodb")).unwrap();
+    let table = db.open_table("data").unwrap();
+
+    // Data stored under the alias tag "modified" (a legacy variant name).
+    let w = table.write().unwrap();
+    w.put("e/modified/version", &3u32).unwrap();
+    w.commit().unwrap();
+
+    assert_eq!(
+        table.read().unwrap().load::<Event>("e").unwrap(),
+        Event::Updated {
+            version: 3
+        }
+    );
+}

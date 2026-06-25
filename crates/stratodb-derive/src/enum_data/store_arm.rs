@@ -1,13 +1,14 @@
+use super::variant_parts::VariantParts;
 use proc_macro2::TokenStream as TokenStream2;
 use quote::{format_ident, quote};
-use syn::{Fields, Ident, Variant};
+use syn::{Fields, Ident};
 
 /// A `match self` arm that writes one variant's payload under its tag.
-pub(super) fn store_arm(variant: &Variant) -> TokenStream2 {
-    let id = &variant.ident;
-    let tag = id.to_string();
+pub(super) fn store_arm(parts: &VariantParts) -> TokenStream2 {
+    let id = parts.ident();
+    let tag = parts.tag();
 
-    match &variant.fields {
+    match parts.fields() {
         Fields::Unit => quote! {
             Self::#id => {
                 ::stratodb::access::Writer::put_scalar(writer, &at.child_name(#tag), ::stratodb::data::Scalar::Null)?;

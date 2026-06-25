@@ -6,5 +6,6 @@ mod default;
 mod field;
 mod misc;
 mod rename;
+mod variant;
 
-pub(crate) use self::{container::ContainerAttrs, field::FieldAttrs};
+pub(crate) use self::{container::ContainerAttrs, field::FieldAttrs, rename::RenameRule, variant::VariantAttrs};

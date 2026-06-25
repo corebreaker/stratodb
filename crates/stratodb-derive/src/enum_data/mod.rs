@@ -16,5 +16,6 @@ mod accessors;
 mod expand_macro;
 mod load_arm;
 mod store_arm;
+mod variant_parts;
 
 pub(crate) use expand_macro::expand_enum;

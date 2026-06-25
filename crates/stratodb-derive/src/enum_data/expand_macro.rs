@@ -1,19 +1,29 @@
-use super::{accessors::accessors, load_arm::load_arm, store_arm::store_arm};
-use crate::desc::enum_desc;
+use super::{accessors::accessors, load_arm::load_arm, store_arm::store_arm, variant_parts::VariantParts};
+use crate::{attr::RenameRule, desc::enum_desc};
 use proc_macro2::TokenStream as TokenStream2;
 use quote::{format_ident, quote};
 use syn::{DataEnum, DeriveInput, Result as SynResult};
 
-pub(crate) fn expand_enum(input: &DeriveInput, data: &DataEnum) -> SynResult<TokenStream2> {
+pub(crate) fn expand_enum(
+    input: &DeriveInput,
+    data: &DataEnum,
+    rename_all: Option<RenameRule>,
+) -> SynResult<TokenStream2> {
     let vis = &input.vis;
     let name = &input.ident;
     let ref_name = format_ident!("Strato{}", name);
     let mut_name = format_ident!("Strato{}Mut", name);
     let desc_name = format_ident!("Strato{}Desc", name);
 
-    let store_arms = data.variants.iter().map(store_arm);
-    let load_arms = data.variants.iter().map(load_arm);
-    let variant_names: Vec<String> = data.variants.iter().map(|v| v.ident.to_string()).collect();
+    let parts = data
+        .variants
+        .iter()
+        .map(|variant| VariantParts::new(variant, rename_all))
+        .collect::<SynResult<Vec<_>>>()?;
+
+    let store_arms = parts.iter().map(store_arm);
+    let load_arms = parts.iter().map(load_arm);
+    let variant_names: Vec<String> = parts.iter().map(|p| p.tag().to_string()).collect();
 
     let sdata_impl = quote! {
         #[automatically_derived]

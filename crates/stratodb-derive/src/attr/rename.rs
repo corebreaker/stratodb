@@ -53,4 +53,37 @@ impl RenameRule {
             Self::ScreamingKebab => field.to_ascii_uppercase().replace('_', "-"),
         }
     }
+
+    /// Applies the rule to an enum variant name (a Rust variant is `PascalCase`).
+    pub(crate) fn apply_to_variant(self, variant: &str) -> String {
+        match self {
+            Self::Pascal => variant.to_owned(),
+            Self::Lower => variant.to_ascii_lowercase(),
+            Self::Upper => variant.to_ascii_uppercase(),
+            Self::Camel => lower_first(variant),
+            Self::Snake => split_pascal(variant, '_', false),
+            Self::ScreamingSnake => split_pascal(variant, '_', true),
+            Self::Kebab => split_pascal(variant, '-', false),
+            Self::ScreamingKebab => split_pascal(variant, '-', true),
+        }
+    }
+}
+
+/// Lower- or upper-cases `variant`, inserting `sep` before each interior capital
+/// (`FooBar` -> `foo_bar` / `FOO-BAR`).
+fn split_pascal(variant: &str, sep: char, screaming: bool) -> String {
+    let mut out = String::new();
+    for (i, ch) in variant.chars().enumerate() {
+        if i > 0 && ch.is_ascii_uppercase() {
+            out.push(sep);
+        }
+
+        out.push(if screaming {
+            ch.to_ascii_uppercase()
+        } else {
+            ch.to_ascii_lowercase()
+        });
+    }
+
+    out
 }

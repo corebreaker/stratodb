@@ -1,22 +1,26 @@
+use super::variant_parts::VariantParts;
 use proc_macro2::TokenStream as TokenStream2;
 use quote::quote;
-use syn::{Fields, Variant};
+use syn::Fields;
 
-/// A `match tag` arm that rebuilds one variant from its stored payload.
-pub(super) fn load_arm(variant: &Variant) -> TokenStream2 {
-    let id = &variant.ident;
-    let tag = id.to_string();
+/// A `match tag` arm that rebuilds one variant from its stored payload. The arm
+/// matches the primary tag and every alias; the payload is read from the tag
+/// actually present (so a value stored under an alias resolves to its subtree).
+pub(super) fn load_arm(parts: &VariantParts) -> TokenStream2 {
+    let id = parts.ident();
+    let tag = parts.tag();
+    let aliases = parts.aliases();
 
-    match &variant.fields {
+    match parts.fields() {
         Fields::Unit => quote! {
-            #tag => ::core::result::Result::Ok(Self::#id),
+            #tag #(| #aliases)* => ::core::result::Result::Ok(Self::#id),
         },
         Fields::Unnamed(fields) if fields.unnamed.len() == 1 => {
             let ty = &fields.unnamed[0].ty;
 
             quote! {
-                #tag => ::core::result::Result::Ok(Self::#id(
-                    <#ty as ::stratodb::data::SData>::load(reader, &at.child_name(#tag))?,
+                #tag #(| #aliases)* => ::core::result::Result::Ok(Self::#id(
+                    <#ty as ::stratodb::data::SData>::load(reader, &at.child_name(tag.as_str()))?,
                 )),
             }
         }
@@ -29,8 +33,8 @@ pub(super) fn load_arm(variant: &Variant) -> TokenStream2 {
             });
 
             quote! {
-                #tag => {
-                    let payload = at.child_name(#tag);
+                #tag #(| #aliases)* => {
+                    let payload = at.child_name(tag.as_str());
                     ::core::result::Result::Ok(Self::#id( #(#loads),* ))
                 }
             }
@@ -45,8 +49,8 @@ pub(super) fn load_arm(variant: &Variant) -> TokenStream2 {
             });
 
             quote! {
-                #tag => {
-                    let payload = at.child_name(#tag);
+                #tag #(| #aliases)* => {
+                    let payload = at.child_name(tag.as_str());
                     ::core::result::Result::Ok(Self::#id { #(#inits),* })
                 }
             }
