@@ -9,6 +9,8 @@ pub(crate) struct VariantAttrs {
     rename:  Option<String>,
     /// Extra tags accepted when loading (the primary tag is still used to store).
     aliases: Vec<String>,
+    /// Catch-all: an otherwise-unknown tag loads as this (unit) variant.
+    other:   bool,
 }
 
 impl VariantAttrs {
@@ -33,6 +35,7 @@ impl VariantAttrs {
                     input.parse::<Token![=]>()?;
                     self.aliases.push(input.parse::<LitStr>()?.value());
                 }
+                "other" => self.other = true,
                 other => {
                     return Err(Error::new(
                         key.span(),
@@ -57,5 +60,9 @@ impl VariantAttrs {
 
     pub(crate) fn aliases(&self) -> &[String] {
         &self.aliases
+    }
+
+    pub(crate) fn other(&self) -> bool {
+        self.other
     }
 }

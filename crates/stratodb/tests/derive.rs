@@ -942,3 +942,58 @@ fn untagged_enum_stores_bare_and_loads_by_trial() {
     // An untagged enum stores no tag, so the accessor's variant() is unavailable.
     assert!(r.fetch::<StratoValue>("int").unwrap().variant().is_err());
 }
+
+#[derive(SData, Debug, PartialEq)]
+#[strato(tag = "kind")]
+enum Level {
+    Low,
+    #[strato(other)]
+    Unknown,
+}
+
+#[test]
+fn other_variant_catches_unknown_tags() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = StratoDb::create(dir.path().join("level.stratodb")).unwrap();
+    let table = db.open_table("data").unwrap();
+
+    let w = table.write().unwrap();
+    w.store("low", &Level::Low).unwrap();
+    w.store("unknown", &Level::Unknown).unwrap();
+    w.commit().unwrap();
+
+    let r = table.read().unwrap();
+
+    // A known tag and the `other` variant both roundtrip.
+    assert_eq!(r.load::<Level>("low").unwrap(), Level::Low);
+    assert_eq!(r.load::<Level>("unknown").unwrap(), Level::Unknown);
+
+    // A tag matching no known variant loads as the `other` variant.
+    let w = table.write().unwrap();
+    w.put("weird/kind", &String::from("Sideways")).unwrap();
+    w.commit().unwrap();
+
+    assert_eq!(table.read().unwrap().load::<Level>("weird").unwrap(), Level::Unknown);
+}
+
+#[derive(SData, Debug)]
+#[strato(tag = "kind", expecting = "a known level")]
+enum Strict {
+    On,
+    Off,
+}
+
+#[test]
+fn expecting_customizes_the_no_match_error() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = StratoDb::create(dir.path().join("strict.stratodb")).unwrap();
+    let table = db.open_table("data").unwrap();
+
+    // An unknown tag, with no `other` variant to absorb it.
+    let w = table.write().unwrap();
+    w.put("x/kind", &String::from("Maybe")).unwrap();
+    w.commit().unwrap();
+
+    let error = table.read().unwrap().load::<Strict>("x").unwrap_err();
+    assert!(matches!(error, stratodb::SdbError::Corrupt(message) if message == "a known level"));
+}

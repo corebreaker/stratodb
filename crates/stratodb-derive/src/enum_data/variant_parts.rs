@@ -9,6 +9,7 @@ pub(super) struct VariantParts<'a> {
     variant: &'a Variant,
     tag:     String,
     aliases: Vec<String>,
+    other:   bool,
 }
 
 impl<'a> VariantParts<'a> {
@@ -27,6 +28,7 @@ impl<'a> VariantParts<'a> {
             variant,
             tag,
             aliases: attrs.aliases().to_vec(),
+            other: attrs.other(),
         })
     }
 
@@ -44,5 +46,15 @@ impl<'a> VariantParts<'a> {
 
     pub(super) fn aliases(&self) -> &[String] {
         &self.aliases
+    }
+
+    /// Whether this is the `#[strato(other)]` catch-all variant.
+    pub(super) fn is_other(&self) -> bool {
+        self.other
+    }
+
+    /// Whether this is a unit variant (no payload).
+    pub(super) fn is_unit(&self) -> bool {
+        matches!(self.variant.fields, Fields::Unit)
     }
 }

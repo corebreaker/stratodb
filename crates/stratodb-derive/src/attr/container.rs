@@ -2,7 +2,8 @@
 
 use super::{misc::parse_type_lit, rename::RenameRule};
 use crate::index::IndexAttr;
-
+use quote::quote;
+use proc_macro2::TokenStream as TokenStream2;
 use syn::{parse::ParseStream, Attribute, Error, Ident, LitStr, Result as SynResult, Token, Type};
 
 /// The `#[strato(...)]` attributes that apply to a whole type.
@@ -16,6 +17,7 @@ pub(crate) struct ContainerAttrs {
     tag:        Option<String>,
     content:    Option<String>,
     untagged:   bool,
+    expecting:  Option<String>,
 }
 
 impl ContainerAttrs {
@@ -62,6 +64,10 @@ impl ContainerAttrs {
                     self.content = Some(input.parse::<LitStr>()?.value());
                 }
                 "untagged" => self.untagged = true,
+                "expecting" => {
+                    input.parse::<Token![=]>()?;
+                    self.expecting = Some(input.parse::<LitStr>()?.value());
+                }
                 other => {
                     return Err(Error::new(
                         key.span(),
@@ -78,6 +84,15 @@ impl ContainerAttrs {
         }
 
         Ok(())
+    }
+
+    /// The error value for "no variant matched": the container's `expecting` message
+    /// if set, otherwise `default`.
+    pub(crate) fn no_match_error(&self, default: TokenStream2) -> TokenStream2 {
+        match &self.expecting {
+            Some(message) => quote! { ::stratodb::SdbError::Corrupt(::std::string::String::from(#message)) },
+            None => quote! { ::stratodb::SdbError::Corrupt(#default) },
+        }
     }
 
     pub(crate) fn rename_all(&self) -> Option<RenameRule> {

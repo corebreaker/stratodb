@@ -2,7 +2,7 @@ use super::{accessors::accessors, load_arm::load_arm, store_arm::store_arm, vari
 use crate::{attr::ContainerAttrs, desc::enum_desc};
 use proc_macro2::TokenStream as TokenStream2;
 use quote::{format_ident, quote};
-use syn::{DataEnum, DeriveInput, Result as SynResult};
+use syn::{DataEnum, DeriveInput, Error, Result as SynResult};
 
 pub(crate) fn expand_enum(input: &DeriveInput, data: &DataEnum, container: &ContainerAttrs) -> SynResult<TokenStream2> {
     let vis = &input.vis;
@@ -19,32 +19,76 @@ pub(crate) fn expand_enum(input: &DeriveInput, data: &DataEnum, container: &Cont
         .map(|variant| VariantParts::new(variant, container.rename_all()))
         .collect::<SynResult<Vec<_>>>()?;
 
+    // The catch-all `#[strato(other)]` variant: at most one, unit, never untagged.
+    let other_variant = {
+        let mut others = parts.iter().filter(|part| part.is_other());
+        match (others.next(), others.next()) {
+            (None, _) => None,
+            (Some(_), Some(second)) => {
+                return Err(Error::new(
+                    second.ident().span(),
+                    "at most one variant may be `#[strato(other)]`",
+                ));
+            }
+            (Some(first), None) => {
+                if repr.is_untagged() {
+                    return Err(Error::new(
+                        first.ident().span(),
+                        "`#[strato(other)]` is not supported on untagged enums",
+                    ));
+                }
+                if !first.is_unit() {
+                    return Err(Error::new(
+                        first.ident().span(),
+                        "an `#[strato(other)]` variant must be a unit variant",
+                    ));
+                }
+
+                Some(first)
+            }
+        }
+    };
+
     let store_arms = parts.iter().map(|part| store_arm(part, &repr));
     let variant_names: Vec<String> = parts.iter().map(|part| part.tag().to_string()).collect();
 
     // Untagged has no tag to match on — each variant is tried in declaration order.
     let load_body = if repr.is_untagged() {
         let attempts = parts.iter().map(super::load_arm::untagged_arm);
+        let error = container.no_match_error(quote! { ::std::format!("no untagged variant matched at '{at}'") });
 
         quote! {
             #(#attempts)*
 
-            ::core::result::Result::Err(::stratodb::SdbError::Corrupt(::std::format!(
-                "no untagged variant matched at '{at}'"
-            )))
+            ::core::result::Result::Err(#error)
         }
     } else {
         let tag_load = repr.tag_load();
-        let load_arms = parts.iter().map(|part| load_arm(part, &repr));
+        // The `other` variant is the match's catch-all, so it gets no arm of its own.
+        let load_arms = parts
+            .iter()
+            .filter(|part| !part.is_other())
+            .map(|part| load_arm(part, &repr));
+
+        let catch_all = match other_variant {
+            Some(part) => {
+                let id = part.ident();
+
+                quote! { _ => ::core::result::Result::Ok(Self::#id), }
+            }
+            None => {
+                let error = container.no_match_error(quote! { ::std::format!("unknown enum variant tag: {tag}") });
+
+                quote! { _ => ::core::result::Result::Err(#error), }
+            }
+        };
 
         quote! {
             #tag_load
 
             match tag.as_str() {
                 #(#load_arms)*
-                other => ::core::result::Result::Err(::stratodb::SdbError::Corrupt(::std::format!(
-                    "unknown enum variant tag: {other}"
-                ))),
+                #catch_all
             }
         }
     };
