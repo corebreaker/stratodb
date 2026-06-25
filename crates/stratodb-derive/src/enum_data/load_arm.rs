@@ -1,7 +1,7 @@
 use super::{repr::EnumRepr, variant_parts::VariantParts};
 use proc_macro2::TokenStream as TokenStream2;
-use quote::quote;
-use syn::Fields;
+use quote::{format_ident, quote};
+use syn::{Fields, Ident};
 
 /// A `match tag` arm that rebuilds one variant from its stored payload. The arm
 /// matches the primary tag and every alias; the payload is read from the
@@ -101,6 +101,78 @@ fn internal_load_arm(parts: &VariantParts) -> TokenStream2 {
 
             quote! {
                 #tag #(| #aliases)* => ::core::result::Result::Ok(Self::#id { #(#inits),* }),
+            }
+        }
+    }
+}
+
+/// One untagged-load attempt: rebuild this variant from the bare payload at `at`,
+/// falling through (without erroring) if a field is absent or has the wrong
+/// shape. Emitted once per variant, in declaration order; the first that fits wins.
+pub(super) fn untagged_arm(parts: &VariantParts) -> TokenStream2 {
+    let id = parts.ident();
+
+    match parts.fields() {
+        Fields::Unit => quote! {
+            if let ::core::result::Result::Ok(::core::option::Option::Some(::stratodb::data::Scalar::Null)) =
+                ::stratodb::access::Reader::scalar_at(reader, at)
+            {
+                return ::core::result::Result::Ok(Self::#id);
+            }
+        },
+        Fields::Unnamed(fields) if fields.unnamed.len() == 1 => {
+            let ty = &fields.unnamed[0].ty;
+
+            quote! {
+                if let ::core::result::Result::Ok(inner) = <#ty as ::stratodb::data::SData>::load(reader, at) {
+                    return ::core::result::Result::Ok(Self::#id(inner));
+                }
+            }
+        }
+        Fields::Unnamed(fields) => {
+            let binds: Vec<Ident> = (0..fields.unnamed.len()).map(|i| format_ident!("f{}", i)).collect();
+            let lets = fields.unnamed.iter().enumerate().map(|(index, field)| {
+                let ty = &field.ty;
+                let bind = &binds[index];
+                let index = index as u64;
+
+                quote! {
+                    let ::core::result::Result::Ok(#bind) =
+                        <#ty as ::stratodb::data::SData>::load(reader, &at.child_index(#index))
+                    else {
+                        break '__attempt;
+                    };
+                }
+            });
+
+            quote! {
+                '__attempt: {
+                    #(#lets)*
+                    return ::core::result::Result::Ok(Self::#id( #(#binds),* ));
+                }
+            }
+        }
+        Fields::Named(fields) => {
+            let names: Vec<&Ident> = fields.named.iter().map(|f| f.ident.as_ref().unwrap()).collect();
+            let lets = fields.named.iter().map(|field| {
+                let name = field.ident.as_ref().unwrap();
+                let name_str = name.to_string();
+                let ty = &field.ty;
+
+                quote! {
+                    let ::core::result::Result::Ok(#name) =
+                        <#ty as ::stratodb::data::SData>::load(reader, &at.child_name(#name_str))
+                    else {
+                        break '__attempt;
+                    };
+                }
+            });
+
+            quote! {
+                '__attempt: {
+                    #(#lets)*
+                    return ::core::result::Result::Ok(Self::#id { #(#names),* });
+                }
             }
         }
     }

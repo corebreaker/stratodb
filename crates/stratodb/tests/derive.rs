@@ -888,3 +888,57 @@ fn internally_tagged_enum_flattens_tag_and_payload() {
     // The accessor reads the tag from the `type` field.
     assert_eq!(r.fetch::<StratoNode>("pair").unwrap().variant().unwrap(), "Pair");
 }
+
+#[derive(SData, Debug, PartialEq)]
+#[strato(untagged)]
+enum Value {
+    Empty,
+    Int(i64),
+    Pair(i64, i64),
+    Record { id: u32, name: String },
+}
+
+#[test]
+fn untagged_enum_stores_bare_and_loads_by_trial() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = StratoDb::create(dir.path().join("value.stratodb")).unwrap();
+    let table = db.open_table("data").unwrap();
+
+    let w = table.write().unwrap();
+    w.store("empty", &Value::Empty).unwrap();
+    w.store("int", &Value::Int(42)).unwrap();
+    w.store("pair", &Value::Pair(1, 2)).unwrap();
+    w.store(
+        "rec",
+        &Value::Record {
+            id:   7,
+            name: String::from("x"),
+        },
+    )
+    .unwrap();
+    w.commit().unwrap();
+
+    let r = table.read().unwrap();
+
+    // Stored bare — no tag node; the payload sits directly at the path.
+    assert_eq!(r.get::<i64>("int").unwrap(), Some(42));
+    assert_eq!(r.get::<i64>("pair[0]").unwrap(), Some(1));
+    assert_eq!(r.get::<i64>("pair[1]").unwrap(), Some(2));
+    assert_eq!(r.get::<u32>("rec/id").unwrap(), Some(7));
+    assert_eq!(r.get::<String>("rec/name").unwrap(), Some(String::from("x")));
+
+    // Load picks the first variant whose shape fits, in declaration order.
+    assert_eq!(r.load::<Value>("empty").unwrap(), Value::Empty);
+    assert_eq!(r.load::<Value>("int").unwrap(), Value::Int(42));
+    assert_eq!(r.load::<Value>("pair").unwrap(), Value::Pair(1, 2));
+    assert_eq!(
+        r.load::<Value>("rec").unwrap(),
+        Value::Record {
+            id:   7,
+            name: String::from("x"),
+        }
+    );
+
+    // An untagged enum stores no tag, so the accessor's variant() is unavailable.
+    assert!(r.fetch::<StratoValue>("int").unwrap().variant().is_err());
+}

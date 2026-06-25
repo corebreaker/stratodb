@@ -20,10 +20,34 @@ pub(crate) fn expand_enum(input: &DeriveInput, data: &DataEnum, container: &Cont
         .collect::<SynResult<Vec<_>>>()?;
 
     let store_arms = parts.iter().map(|part| store_arm(part, &repr));
-    let load_arms = parts.iter().map(|part| load_arm(part, &repr));
     let variant_names: Vec<String> = parts.iter().map(|part| part.tag().to_string()).collect();
 
-    let tag_load = repr.tag_load();
+    // Untagged has no tag to match on — each variant is tried in declaration order.
+    let load_body = if repr.is_untagged() {
+        let attempts = parts.iter().map(super::load_arm::untagged_arm);
+
+        quote! {
+            #(#attempts)*
+
+            ::core::result::Result::Err(::stratodb::SdbError::Corrupt(::std::format!(
+                "no untagged variant matched at '{at}'"
+            )))
+        }
+    } else {
+        let tag_load = repr.tag_load();
+        let load_arms = parts.iter().map(|part| load_arm(part, &repr));
+
+        quote! {
+            #tag_load
+
+            match tag.as_str() {
+                #(#load_arms)*
+                other => ::core::result::Result::Err(::stratodb::SdbError::Corrupt(::std::format!(
+                    "unknown enum variant tag: {other}"
+                ))),
+            }
+        }
+    };
 
     let sdata_impl = quote! {
         #[automatically_derived]
@@ -50,14 +74,7 @@ pub(crate) fn expand_enum(input: &DeriveInput, data: &DataEnum, container: &Cont
                 reader: &R,
                 at: &::stratodb::path::SPath,
             ) -> ::stratodb::SdbResult<Self> {
-                #tag_load
-
-                match tag.as_str() {
-                    #(#load_arms)*
-                    other => ::core::result::Result::Err(::stratodb::SdbError::Corrupt(::std::format!(
-                        "unknown enum variant tag: {other}"
-                    ))),
-                }
+                #load_body
             }
         }
     };
