@@ -6,7 +6,7 @@ use crate::{
     Table,
 };
 
-use redb::Database;
+use redb::{backends::InMemoryBackend, Database};
 use std::{path::Path, sync::Arc};
 
 /// A StratoDB database: a single file holding one or more tables.
@@ -22,6 +22,20 @@ impl StratoDb {
     /// Opens the database at `path`, creating it if it does not exist.
     pub fn create(path: impl AsRef<Path>) -> SdbResult<Self> {
         let db = Database::create(path)?;
+        engine::bootstrap_metadata(&db)?;
+
+        Ok(Self {
+            inner: Arc::new(DbInner::new(db)),
+        })
+    }
+
+    /// Opens a transient database held entirely in memory.
+    ///
+    /// Nothing is written to disk: every node, index, and the `$metadata`
+    /// registry live in RAM and are discarded when the last handle is dropped.
+    /// Useful for tests and short-lived computations.
+    pub fn create_in_memory() -> SdbResult<Self> {
+        let db = Database::builder().create_with_backend(InMemoryBackend::new())?;
         engine::bootstrap_metadata(&db)?;
 
         Ok(Self {

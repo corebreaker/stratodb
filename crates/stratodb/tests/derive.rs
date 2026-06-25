@@ -21,8 +21,7 @@ struct Sample {
 
 #[test]
 fn derived_struct_store_fetch_load_roundtrip() {
-    let dir = tempfile::tempdir().unwrap();
-    let db = StratoDb::create(dir.path().join("derive.stratodb")).unwrap();
+    let db = StratoDb::create_in_memory().unwrap();
     let table = db.open_table("data").unwrap();
 
     let sample = Sample {
@@ -55,8 +54,7 @@ fn derived_struct_store_fetch_load_roundtrip() {
 
 #[test]
 fn derived_struct_mutation_through_generated_setters() {
-    let dir = tempfile::tempdir().unwrap();
-    let db = StratoDb::create(dir.path().join("derive_mut.stratodb")).unwrap();
+    let db = StratoDb::create_in_memory().unwrap();
     let table = db.open_table("data").unwrap();
 
     let w = table.write().unwrap();
@@ -102,8 +100,7 @@ struct Profile {
 
 #[test]
 fn derived_struct_with_container_fields() {
-    let dir = tempfile::tempdir().unwrap();
-    let db = StratoDb::create(dir.path().join("derive_containers.stratodb")).unwrap();
+    let db = StratoDb::create_in_memory().unwrap();
     let table = db.open_table("data").unwrap();
 
     let mut scores = BTreeMap::new();
@@ -150,8 +147,7 @@ enum Shape {
 
 #[test]
 fn derived_enum_roundtrips_every_variant_shape() {
-    let dir = tempfile::tempdir().unwrap();
-    let db = StratoDb::create(dir.path().join("derive_enum.stratodb")).unwrap();
+    let db = StratoDb::create_in_memory().unwrap();
     let table = db.open_table("data").unwrap();
 
     let cases = [
@@ -178,8 +174,7 @@ fn derived_enum_roundtrips_every_variant_shape() {
 
 #[test]
 fn derived_enum_is_externally_tagged_and_accessor_reports_variant() {
-    let dir = tempfile::tempdir().unwrap();
-    let db = StratoDb::create(dir.path().join("derive_enum_tag.stratodb")).unwrap();
+    let db = StratoDb::create_in_memory().unwrap();
     let table = db.open_table("data").unwrap();
 
     let w = table.write().unwrap();
@@ -211,8 +206,7 @@ fn derived_enum_is_externally_tagged_and_accessor_reports_variant() {
 
 #[test]
 fn derived_enum_restore_replaces_previous_variant() {
-    let dir = tempfile::tempdir().unwrap();
-    let db = StratoDb::create(dir.path().join("derive_enum_replace.stratodb")).unwrap();
+    let db = StratoDb::create_in_memory().unwrap();
     let table = db.open_table("data").unwrap();
 
     let w = table.write().unwrap();
@@ -261,8 +255,7 @@ struct Renamed {
 
 #[test]
 fn rename_rename_all_and_alias() {
-    let dir = tempfile::tempdir().unwrap();
-    let db = StratoDb::create(dir.path().join("renamed.stratodb")).unwrap();
+    let db = StratoDb::create_in_memory().unwrap();
     let table = db.open_table("data").unwrap();
 
     let value = Renamed {
@@ -297,8 +290,7 @@ fn rename_rename_all_and_alias() {
 
 #[test]
 fn alias_is_accepted_on_load() {
-    let dir = tempfile::tempdir().unwrap();
-    let db = StratoDb::create(dir.path().join("alias.stratodb")).unwrap();
+    let db = StratoDb::create_in_memory().unwrap();
     let table = db.open_table("data").unwrap();
 
     // `nickname` data stored under one of its aliases (a legacy node name).
@@ -345,8 +337,7 @@ struct Settings {
 
 #[test]
 fn skip_and_default_family_roundtrip() {
-    let dir = tempfile::tempdir().unwrap();
-    let db = StratoDb::create(dir.path().join("settings.stratodb")).unwrap();
+    let db = StratoDb::create_in_memory().unwrap();
     let table = db.open_table("data").unwrap();
 
     let original = Settings {
@@ -405,8 +396,7 @@ fn skip_and_default_family_roundtrip() {
 
 #[test]
 fn defaults_fill_absent_nodes() {
-    let dir = tempfile::tempdir().unwrap();
-    let db = StratoDb::create(dir.path().join("settings_partial.stratodb")).unwrap();
+    let db = StratoDb::create_in_memory().unwrap();
     let table = db.open_table("data").unwrap();
 
     // Only `name` is present; everything else is absent.
@@ -430,8 +420,7 @@ fn defaults_fill_absent_nodes() {
 
 #[test]
 fn skip_store_if_omits_when_predicate_holds() {
-    let dir = tempfile::tempdir().unwrap();
-    let db = StratoDb::create(dir.path().join("settings_skipif.stratodb")).unwrap();
+    let db = StratoDb::create_in_memory().unwrap();
     let table = db.open_table("data").unwrap();
 
     let w = table.write().unwrap();
@@ -485,8 +474,7 @@ struct Measurement {
 
 #[test]
 fn with_uses_the_custom_store_and_load() {
-    let dir = tempfile::tempdir().unwrap();
-    let db = StratoDb::create(dir.path().join("with.stratodb")).unwrap();
+    let db = StratoDb::create_in_memory().unwrap();
     let table = db.open_table("data").unwrap();
 
     let m = Measurement {
@@ -516,8 +504,7 @@ struct Reading {
 
 #[test]
 fn store_with_and_load_with_compose_with_default() {
-    let dir = tempfile::tempdir().unwrap();
-    let db = StratoDb::create(dir.path().join("reading.stratodb")).unwrap();
+    let db = StratoDb::create_in_memory().unwrap();
     let table = db.open_table("data").unwrap();
 
     let w = table.write().unwrap();
@@ -574,8 +561,7 @@ impl TryFrom<String> for Email {
 
 #[test]
 fn into_and_try_from_store_a_newtype_as_its_inner_type() {
-    let dir = tempfile::tempdir().unwrap();
-    let db = StratoDb::create(dir.path().join("email.stratodb")).unwrap();
+    let db = StratoDb::create_in_memory().unwrap();
     let table = db.open_table("data").unwrap();
 
     let w = table.write().unwrap();
@@ -593,8 +579,7 @@ fn into_and_try_from_store_a_newtype_as_its_inner_type() {
 
 #[test]
 fn try_from_rejects_an_invalid_stored_value() {
-    let dir = tempfile::tempdir().unwrap();
-    let db = StratoDb::create(dir.path().join("email_bad.stratodb")).unwrap();
+    let db = StratoDb::create_in_memory().unwrap();
     let table = db.open_table("data").unwrap();
 
     // A bare String that is not a valid Email, written directly.
@@ -633,8 +618,7 @@ impl From<Vec<i64>> for Point {
 
 #[test]
 fn into_and_from_store_a_struct_under_a_different_shape() {
-    let dir = tempfile::tempdir().unwrap();
-    let db = StratoDb::create(dir.path().join("point.stratodb")).unwrap();
+    let db = StratoDb::create_in_memory().unwrap();
     let table = db.open_table("data").unwrap();
 
     let w = table.write().unwrap();
@@ -669,8 +653,7 @@ struct Account {
 
 #[test]
 fn delegated_field_exposes_the_target_types_accessor() {
-    let dir = tempfile::tempdir().unwrap();
-    let db = StratoDb::create(dir.path().join("account.stratodb")).unwrap();
+    let db = StratoDb::create_in_memory().unwrap();
     let table = db.open_table("data").unwrap();
 
     let w = table.write().unwrap();
@@ -711,8 +694,7 @@ enum Event {
 
 #[test]
 fn enum_rename_all_variant_rename_and_alias() {
-    let dir = tempfile::tempdir().unwrap();
-    let db = StratoDb::create(dir.path().join("events.stratodb")).unwrap();
+    let db = StratoDb::create_in_memory().unwrap();
     let table = db.open_table("data").unwrap();
 
     let w = table.write().unwrap();
@@ -751,8 +733,7 @@ fn enum_rename_all_variant_rename_and_alias() {
 
 #[test]
 fn enum_variant_alias_is_accepted_on_load() {
-    let dir = tempfile::tempdir().unwrap();
-    let db = StratoDb::create(dir.path().join("events_alias.stratodb")).unwrap();
+    let db = StratoDb::create_in_memory().unwrap();
     let table = db.open_table("data").unwrap();
 
     // Data stored under the alias tag "modified" (a legacy variant name).
@@ -779,8 +760,7 @@ enum Cmd {
 
 #[test]
 fn adjacently_tagged_enum_lays_out_tag_and_content_and_roundtrips() {
-    let dir = tempfile::tempdir().unwrap();
-    let db = StratoDb::create(dir.path().join("cmd.stratodb")).unwrap();
+    let db = StratoDb::create_in_memory().unwrap();
     let table = db.open_table("data").unwrap();
 
     let w = table.write().unwrap();
@@ -840,8 +820,7 @@ enum Node {
 
 #[test]
 fn internally_tagged_enum_flattens_tag_and_payload() {
-    let dir = tempfile::tempdir().unwrap();
-    let db = StratoDb::create(dir.path().join("node.stratodb")).unwrap();
+    let db = StratoDb::create_in_memory().unwrap();
     let table = db.open_table("data").unwrap();
 
     let w = table.write().unwrap();
@@ -900,8 +879,7 @@ enum Value {
 
 #[test]
 fn untagged_enum_stores_bare_and_loads_by_trial() {
-    let dir = tempfile::tempdir().unwrap();
-    let db = StratoDb::create(dir.path().join("value.stratodb")).unwrap();
+    let db = StratoDb::create_in_memory().unwrap();
     let table = db.open_table("data").unwrap();
 
     let w = table.write().unwrap();
@@ -953,8 +931,7 @@ enum Level {
 
 #[test]
 fn other_variant_catches_unknown_tags() {
-    let dir = tempfile::tempdir().unwrap();
-    let db = StratoDb::create(dir.path().join("level.stratodb")).unwrap();
+    let db = StratoDb::create_in_memory().unwrap();
     let table = db.open_table("data").unwrap();
 
     let w = table.write().unwrap();
@@ -985,8 +962,7 @@ enum Strict {
 
 #[test]
 fn expecting_customizes_the_no_match_error() {
-    let dir = tempfile::tempdir().unwrap();
-    let db = StratoDb::create(dir.path().join("strict.stratodb")).unwrap();
+    let db = StratoDb::create_in_memory().unwrap();
     let table = db.open_table("data").unwrap();
 
     // An unknown tag, with no `other` variant to absorb it.
@@ -1006,8 +982,7 @@ struct Wrapper<T> {
 
 #[test]
 fn generic_struct_roundtrips_across_instantiations() {
-    let dir = tempfile::tempdir().unwrap();
-    let db = StratoDb::create(dir.path().join("wrapper.stratodb")).unwrap();
+    let db = StratoDb::create_in_memory().unwrap();
     let table = db.open_table("data").unwrap();
 
     let w = table.write().unwrap();
@@ -1063,8 +1038,7 @@ enum Either<L, R> {
 
 #[test]
 fn generic_enum_roundtrips() {
-    let dir = tempfile::tempdir().unwrap();
-    let db = StratoDb::create(dir.path().join("either.stratodb")).unwrap();
+    let db = StratoDb::create_in_memory().unwrap();
     let table = db.open_table("data").unwrap();
 
     let w = table.write().unwrap();
@@ -1094,8 +1068,7 @@ struct Phantom<T> {
 
 #[test]
 fn bound_overrides_the_default_sdata_bound() {
-    let dir = tempfile::tempdir().unwrap();
-    let db = StratoDb::create(dir.path().join("phantom.stratodb")).unwrap();
+    let db = StratoDb::create_in_memory().unwrap();
     let table = db.open_table("data").unwrap();
 
     // `NotSData` is not `SData`; the empty `bound` drops the default `T: SData`,
@@ -1133,8 +1106,7 @@ struct Doc {
 
 #[test]
 fn flatten_merges_a_nested_struct_into_the_parent() {
-    let dir = tempfile::tempdir().unwrap();
-    let db = StratoDb::create(dir.path().join("doc.stratodb")).unwrap();
+    let db = StratoDb::create_in_memory().unwrap();
     let table = db.open_table("data").unwrap();
 
     let w = table.write().unwrap();

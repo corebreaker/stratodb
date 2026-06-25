@@ -22,8 +22,7 @@ struct User {
 
 #[test]
 fn find_returns_typed_entities() {
-    let dir = tempfile::tempdir().unwrap();
-    let db = StratoDb::create(dir.path().join("idx_typed.stratodb")).unwrap();
+    let db = StratoDb::create_in_memory().unwrap();
     let users = db.open_table("users").unwrap();
 
     users
@@ -76,8 +75,7 @@ struct Person {
 
 #[test]
 fn derived_index_attributes_declare_and_create() {
-    let dir = tempfile::tempdir().unwrap();
-    let db = StratoDb::create(dir.path().join("idx_derived.stratodb")).unwrap();
+    let db = StratoDb::create_in_memory().unwrap();
     let people = db.open_table("people").unwrap();
 
     // One call registers every index the type declares, scoped to the pattern.
@@ -255,8 +253,7 @@ struct Account {
 
 #[test]
 fn renamed_field_indexes_under_its_stored_name() {
-    let dir = tempfile::tempdir().unwrap();
-    let db = StratoDb::create(dir.path().join("accounts.stratodb")).unwrap();
+    let db = StratoDb::create_in_memory().unwrap();
     let accounts = db.open_table("accounts").unwrap();
     accounts.create_indexes::<Account>("accounts/*").unwrap();
 

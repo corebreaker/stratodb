@@ -19,8 +19,7 @@ fn root(path: &str) -> SPath {
 
 #[test]
 fn rooted_read_resolves_relative_to_root() {
-    let dir = tempfile::tempdir().unwrap();
-    let db = StratoDb::create(dir.path().join("rr.stratodb")).unwrap();
+    let db = StratoDb::create_in_memory().unwrap();
     let table = db.open_table("data").unwrap();
 
     let w = table.write().unwrap();
@@ -53,8 +52,7 @@ fn rooted_read_resolves_relative_to_root() {
 
 #[test]
 fn rooted_write_is_relative_and_persists() {
-    let dir = tempfile::tempdir().unwrap();
-    let db = StratoDb::create(dir.path().join("rw.stratodb")).unwrap();
+    let db = StratoDb::create_in_memory().unwrap();
     let table = db.open_table("data").unwrap();
 
     let w = table.write().unwrap();
@@ -87,8 +85,7 @@ fn rooted_write_is_relative_and_persists() {
 
 #[test]
 fn rooted_writes_maintain_indexes() {
-    let dir = tempfile::tempdir().unwrap();
-    let db = StratoDb::create(dir.path().join("rw_idx.stratodb")).unwrap();
+    let db = StratoDb::create_in_memory().unwrap();
     let users = db.open_table("users").unwrap();
 
     users
@@ -120,8 +117,7 @@ fn rooted_writes_maintain_indexes() {
 
 #[test]
 fn rooted_find_scopes_to_the_subtree() {
-    let dir = tempfile::tempdir().unwrap();
-    let db = StratoDb::create(dir.path().join("rf.stratodb")).unwrap();
+    let db = StratoDb::create_in_memory().unwrap();
     let org = db.open_table("org").unwrap();
 
     org.create_index(&IndexDef::new(
@@ -185,8 +181,7 @@ fn rooted_find_scopes_to_the_subtree() {
 
 #[test]
 fn rooted_query_builder_scopes_and_reverses() {
-    let dir = tempfile::tempdir().unwrap();
-    let db = StratoDb::create(dir.path().join("rq.stratodb")).unwrap();
+    let db = StratoDb::create_in_memory().unwrap();
     let org = db.open_table("org").unwrap();
 
     org.create_index(&IndexDef::new(
