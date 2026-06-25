@@ -1,10 +1,21 @@
-use crate::field_parts::FieldParts;
+use crate::{field_parts::FieldParts, generics::Generics};
 use proc_macro2::TokenStream as TokenStream2;
 use quote::quote;
 use syn::Ident;
 
 /// The `SData` impl: store/load shred the struct into one child node per field.
-pub(crate) fn sdata_impl(name: &Ident, ref_name: &Ident, mut_name: &Ident, parts: &[FieldParts]) -> TokenStream2 {
+pub(crate) fn sdata_impl(
+    name: &Ident,
+    ref_name: &Ident,
+    mut_name: &Ident,
+    parts: &[FieldParts],
+    generics: &Generics,
+) -> TokenStream2 {
+    let impl_generics = generics.sdata_impl();
+    let ty_generics = generics.sdata_ty();
+    let where_clause = generics.sdata_where();
+    let accessor_ty = generics.accessor_ty();
+
     // Only stored-shape fields are written; `skip_store_if` makes it conditional.
     let store_fields = parts.iter().filter(|p| p.attrs().in_shape()).map(|p| {
         let getter = p.getter();
@@ -29,13 +40,13 @@ pub(crate) fn sdata_impl(name: &Ident, ref_name: &Ident, mut_name: &Ident, parts
 
     quote! {
         #[automatically_derived]
-        impl ::stratodb::data::SData for #name {
-            type Ref<'t> = #ref_name<'t>;
-            type Mut<'t> = #mut_name<'t>;
+        impl #impl_generics ::stratodb::data::SData for #name #ty_generics #where_clause {
+            type Ref<'t> = #ref_name #accessor_ty;
+            type Mut<'t> = #mut_name #accessor_ty;
 
-            fn store<W: ::stratodb::access::Writer>(
+            fn store<__W: ::stratodb::access::Writer>(
                 &self,
-                writer: &W,
+                writer: &__W,
                 at: &::stratodb::path::SPath,
             ) -> ::stratodb::SdbResult<()> {
                 #(#store_fields)*
@@ -43,8 +54,8 @@ pub(crate) fn sdata_impl(name: &Ident, ref_name: &Ident, mut_name: &Ident, parts
                 ::core::result::Result::Ok(())
             }
 
-            fn load<R: ::stratodb::access::Reader>(
-                reader: &R,
+            fn load<__R: ::stratodb::access::Reader>(
+                reader: &__R,
                 at: &::stratodb::path::SPath,
             ) -> ::stratodb::SdbResult<Self> {
                 ::core::result::Result::Ok(Self {

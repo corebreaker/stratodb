@@ -1,7 +1,7 @@
 //! Type-level `#[strato(...)]` attributes.
 
 use super::{misc::parse_type_lit, rename::RenameRule};
-use crate::index::IndexAttr;
+use crate::{generics::Bounds, index::IndexAttr};
 use quote::quote;
 use proc_macro2::TokenStream as TokenStream2;
 use syn::{parse::ParseStream, Attribute, Error, Ident, LitStr, Result as SynResult, Token, Type};
@@ -18,6 +18,7 @@ pub(crate) struct ContainerAttrs {
     content:    Option<String>,
     untagged:   bool,
     expecting:  Option<String>,
+    bound:      Option<Bounds>,
 }
 
 impl ContainerAttrs {
@@ -63,10 +64,16 @@ impl ContainerAttrs {
                     input.parse::<Token![=]>()?;
                     self.content = Some(input.parse::<LitStr>()?.value());
                 }
-                "untagged" => self.untagged = true,
+                "untagged" => {
+                    self.untagged = true;
+                }
                 "expecting" => {
                     input.parse::<Token![=]>()?;
                     self.expecting = Some(input.parse::<LitStr>()?.value());
+                }
+                "bound" => {
+                    input.parse::<Token![=]>()?;
+                    self.bound = Some(input.parse::<LitStr>()?.parse_with(Bounds::parse_terminated)?);
                 }
                 other => {
                     return Err(Error::new(
@@ -136,5 +143,10 @@ impl ContainerAttrs {
     /// Whether the enum is untagged (payload stored bare, tried in order on load).
     pub(crate) fn untagged(&self) -> bool {
         self.untagged
+    }
+
+    /// Custom `bound` predicates that replace the default `T: SData` on a generic type.
+    pub(crate) fn bound(&self) -> Option<&Bounds> {
+        self.bound.as_ref()
     }
 }

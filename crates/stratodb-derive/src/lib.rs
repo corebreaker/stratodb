@@ -26,6 +26,7 @@ mod desc;
 mod enum_data;
 mod expand_macro;
 mod field_parts;
+mod generics;
 mod index;
 mod named_fields;
 mod refs;

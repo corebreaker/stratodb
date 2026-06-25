@@ -1,8 +1,7 @@
 //! Generates the `SIndexed` impl from a struct's `#[strato(index(...))]` attrs.
 
 use super::IndexAttr;
-use crate::field_parts::FieldParts;
-
+use crate::{field_parts::FieldParts, generics::Generics};
 use proc_macro2::TokenStream as TokenStream2;
 use quote::quote;
 use syn::{Error, Ident, Result as SynResult};
@@ -12,7 +11,12 @@ use syn::{Error, Ident, Result as SynResult};
 /// name (so a `rename`d/`rename_all`d field indexes the right node). A struct with
 /// no index attributes still gets an impl (returning no defs), so
 /// [`Table::create_indexes`] works uniformly.
-pub(crate) fn indexed_impl(name: &Ident, parts: &[FieldParts], indexes: &[IndexAttr]) -> SynResult<TokenStream2> {
+pub(crate) fn indexed_impl(
+    name: &Ident,
+    parts: &[FieldParts],
+    indexes: &[IndexAttr],
+    generics: &Generics,
+) -> SynResult<TokenStream2> {
     for index in indexes {
         for column in index.columns() {
             if !parts.iter().any(|part| part.getter() == column.field()) {
@@ -52,9 +56,13 @@ pub(crate) fn indexed_impl(name: &Ident, parts: &[FieldParts], indexes: &[IndexA
         }
     });
 
+    let impl_generics = generics.sdata_impl();
+    let ty_generics = generics.sdata_ty();
+    let where_clause = generics.sdata_where();
+
     Ok(quote! {
         #[automatically_derived]
-        impl ::stratodb::index::SIndexed for #name {
+        impl #impl_generics ::stratodb::index::SIndexed for #name #ty_generics #where_clause {
             fn index_defs(pattern: &str) -> ::std::vec::Vec<::stratodb::index::IndexDef> {
                 ::std::vec![ #(#defs),* ]
             }

@@ -1,10 +1,15 @@
 use super::{accessors::accessors, load_arm::load_arm, store_arm::store_arm, variant_parts::VariantParts};
-use crate::{attr::ContainerAttrs, desc::enum_desc};
+use crate::{attr::ContainerAttrs, desc::enum_desc, generics::Generics};
 use proc_macro2::TokenStream as TokenStream2;
 use quote::{format_ident, quote};
 use syn::{DataEnum, DeriveInput, Error, Result as SynResult};
 
-pub(crate) fn expand_enum(input: &DeriveInput, data: &DataEnum, container: &ContainerAttrs) -> SynResult<TokenStream2> {
+pub(crate) fn expand_enum(
+    input: &DeriveInput,
+    data: &DataEnum,
+    container: &ContainerAttrs,
+    generics: &Generics,
+) -> SynResult<TokenStream2> {
     let vis = &input.vis;
     let name = &input.ident;
     let ref_name = format_ident!("Strato{}", name);
@@ -93,15 +98,20 @@ pub(crate) fn expand_enum(input: &DeriveInput, data: &DataEnum, container: &Cont
         }
     };
 
+    let impl_generics = generics.sdata_impl();
+    let ty_generics = generics.sdata_ty();
+    let where_clause = generics.sdata_where();
+    let accessor_ty = generics.accessor_ty();
+
     let sdata_impl = quote! {
         #[automatically_derived]
-        impl ::stratodb::data::SData for #name {
-            type Ref<'t> = #ref_name<'t>;
-            type Mut<'t> = #mut_name<'t>;
+        impl #impl_generics ::stratodb::data::SData for #name #ty_generics #where_clause {
+            type Ref<'t> = #ref_name #accessor_ty;
+            type Mut<'t> = #mut_name #accessor_ty;
 
-            fn store<W: ::stratodb::access::Writer>(
+            fn store<__W: ::stratodb::access::Writer>(
                 &self,
-                writer: &W,
+                writer: &__W,
                 at: &::stratodb::path::SPath,
             ) -> ::stratodb::SdbResult<()> {
                 // The node carries exactly one variant, so clear any prior one first.
@@ -114,8 +124,8 @@ pub(crate) fn expand_enum(input: &DeriveInput, data: &DataEnum, container: &Cont
                 ::core::result::Result::Ok(())
             }
 
-            fn load<R: ::stratodb::access::Reader>(
-                reader: &R,
+            fn load<__R: ::stratodb::access::Reader>(
+                reader: &__R,
                 at: &::stratodb::path::SPath,
             ) -> ::stratodb::SdbResult<Self> {
                 #load_body
@@ -123,7 +133,7 @@ pub(crate) fn expand_enum(input: &DeriveInput, data: &DataEnum, container: &Cont
         }
     };
 
-    let accessors = accessors(vis, &ref_name, &mut_name, &repr);
+    let accessors = accessors(vis, &ref_name, &mut_name, &repr, generics);
     let desc = enum_desc(vis, &desc_name, &name.to_string(), &variant_names);
 
     Ok(quote! {

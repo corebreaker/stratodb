@@ -997,3 +997,123 @@ fn expecting_customizes_the_no_match_error() {
     let error = table.read().unwrap().load::<Strict>("x").unwrap_err();
     assert!(matches!(error, stratodb::SdbError::Corrupt(message) if message == "a known level"));
 }
+
+#[derive(SData, Debug, PartialEq)]
+struct Wrapper<T> {
+    value: T,
+    label: String,
+}
+
+#[test]
+fn generic_struct_roundtrips_across_instantiations() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = StratoDb::create(dir.path().join("wrapper.stratodb")).unwrap();
+    let table = db.open_table("data").unwrap();
+
+    let w = table.write().unwrap();
+    w.store(
+        "int",
+        &Wrapper {
+            value: 42i64,
+            label: String::from("answer"),
+        },
+    )
+    .unwrap();
+    w.store(
+        "text",
+        &Wrapper {
+            value: String::from("hi"),
+            label: String::from("greeting"),
+        },
+    )
+    .unwrap();
+    w.commit().unwrap();
+
+    let r = table.read().unwrap();
+
+    // Shredded per field, for each instantiation of T.
+    assert_eq!(r.get::<i64>("int/value").unwrap(), Some(42));
+    assert_eq!(r.get::<String>("int/label").unwrap(), Some(String::from("answer")));
+
+    assert_eq!(
+        r.load::<Wrapper<i64>>("int").unwrap(),
+        Wrapper {
+            value: 42,
+            label: String::from("answer"),
+        }
+    );
+    assert_eq!(
+        r.load::<Wrapper<String>>("text").unwrap(),
+        Wrapper {
+            value: String::from("hi"),
+            label: String::from("greeting"),
+        }
+    );
+
+    // The generated accessor is generic too.
+    let acc = r.fetch::<StratoWrapper<'_, i64>>("int").unwrap();
+    assert_eq!(acc.value().unwrap().get().unwrap(), 42);
+}
+
+#[derive(SData, Debug, PartialEq)]
+enum Either<L, R> {
+    Left(L),
+    Right(R),
+}
+
+#[test]
+fn generic_enum_roundtrips() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = StratoDb::create(dir.path().join("either.stratodb")).unwrap();
+    let table = db.open_table("data").unwrap();
+
+    let w = table.write().unwrap();
+    w.store("l", &Either::<i64, String>::Left(7)).unwrap();
+    w.store("r", &Either::<i64, String>::Right(String::from("x"))).unwrap();
+    w.commit().unwrap();
+
+    let r = table.read().unwrap();
+
+    assert_eq!(r.load::<Either<i64, String>>("l").unwrap(), Either::Left(7));
+    assert_eq!(
+        r.load::<Either<i64, String>>("r").unwrap(),
+        Either::Right(String::from("x"))
+    );
+}
+
+#[derive(Debug, PartialEq)]
+struct NotSData;
+
+#[derive(SData, Debug, PartialEq)]
+#[strato(bound = "")]
+struct Phantom<T> {
+    name: String,
+    #[strato(skip)]
+    tag:  std::marker::PhantomData<T>,
+}
+
+#[test]
+fn bound_overrides_the_default_sdata_bound() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = StratoDb::create(dir.path().join("phantom.stratodb")).unwrap();
+    let table = db.open_table("data").unwrap();
+
+    // `NotSData` is not `SData`; the empty `bound` drops the default `T: SData`,
+    // so `Phantom<NotSData>` derives at all.
+    let value: Phantom<NotSData> = Phantom {
+        name: String::from("x"),
+        tag:  std::marker::PhantomData,
+    };
+
+    let w = table.write().unwrap();
+    w.store("p", &value).unwrap();
+    w.commit().unwrap();
+
+    assert_eq!(
+        table.read().unwrap().load::<Phantom<NotSData>>("p").unwrap(),
+        Phantom {
+            name: String::from("x"),
+            tag:  std::marker::PhantomData,
+        }
+    );
+}

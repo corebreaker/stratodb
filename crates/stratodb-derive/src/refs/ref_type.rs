@@ -1,10 +1,21 @@
-use crate::field_parts::FieldParts;
+use crate::{field_parts::FieldParts, generics::Generics};
 use proc_macro2::TokenStream as TokenStream2;
 use quote::quote;
 use syn::Ident;
 
 /// The read accessor type, its field getters, and its `SRef`/`SIdentifiable` impls.
-pub(crate) fn ref_type(vis: &syn::Visibility, ref_name: &Ident, parts: &[FieldParts]) -> TokenStream2 {
+pub(crate) fn ref_type(
+    vis: &syn::Visibility,
+    ref_name: &Ident,
+    parts: &[FieldParts],
+    generics: &Generics,
+) -> TokenStream2 {
+    let impl_generics = generics.accessor_impl();
+    let ty_generics = generics.accessor_ty();
+    let where_clause = generics.accessor_where();
+    let phantom_field = generics.phantom_field();
+    let phantom_init = generics.phantom_init();
+
     let getters = parts.iter().filter(|p| p.attrs().in_shape()).map(|p| {
         let getter = p.getter();
         let ty = p.ty();
@@ -34,19 +45,20 @@ pub(crate) fn ref_type(vis: &syn::Visibility, ref_name: &Ident, parts: &[FieldPa
 
     quote! {
         #[allow(dead_code)]
-        #vis struct #ref_name<'t> {
+        #vis struct #ref_name #impl_generics #where_clause {
             reader: ::std::sync::Arc<dyn ::stratodb::access::Reader + 't>,
             base:   ::stratodb::path::SPath,
             key:    ::stratodb::Skey,
+            #phantom_field
         }
 
         #[allow(dead_code)]
-        impl<'t> #ref_name<'t> {
+        impl #impl_generics #ref_name #ty_generics #where_clause {
             #(#getters)*
         }
 
         #[automatically_derived]
-        impl<'t> ::stratodb::data::refs::SRef<'t> for #ref_name<'t> {
+        impl #impl_generics ::stratodb::data::refs::SRef<'t> for #ref_name #ty_generics #where_clause {
             fn open(
                 reader: ::std::sync::Arc<dyn ::stratodb::access::Reader + 't>,
                 base: ::stratodb::path::SPath,
@@ -56,12 +68,13 @@ pub(crate) fn ref_type(vis: &syn::Visibility, ref_name: &Ident, parts: &[FieldPa
                     reader,
                     base,
                     key,
+                    #phantom_init
                 }
             }
         }
 
         #[automatically_derived]
-        impl<'t> ::stratodb::data::refs::SIdentifiable for #ref_name<'t> {
+        impl #impl_generics ::stratodb::data::refs::SIdentifiable for #ref_name #ty_generics #where_clause {
             fn key(&self) -> ::stratodb::Skey {
                 self.key
             }

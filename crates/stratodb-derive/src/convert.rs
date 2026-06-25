@@ -8,13 +8,17 @@
 //! `StratoXxx`/`StratoXxxDesc` is generated, so newtype/tuple structs and enums
 //! are all accepted here — the field shape is never inspected.
 
-use crate::attr::ContainerAttrs;
+use crate::{attr::ContainerAttrs, generics::Generics};
 use proc_macro2::TokenStream as TokenStream2;
 use quote::quote;
 use syn::{DeriveInput, Error, Result as SynResult};
 
 /// Generates the delegating `SData` impl for a `from`/`into`/`try_from` type.
-pub(crate) fn convert_impl(input: &DeriveInput, container: &ContainerAttrs) -> SynResult<TokenStream2> {
+pub(crate) fn convert_impl(
+    input: &DeriveInput,
+    container: &ContainerAttrs,
+    generics: &Generics,
+) -> SynResult<TokenStream2> {
     let name = &input.ident;
 
     // Index columns name a struct's fields; a delegated type exposes none.
@@ -65,15 +69,19 @@ pub(crate) fn convert_impl(input: &DeriveInput, container: &ContainerAttrs) -> S
         }
     };
 
+    let impl_generics = generics.sdata_impl();
+    let ty_generics = generics.sdata_ty();
+    let where_clause = generics.sdata_where();
+
     Ok(quote! {
         #[automatically_derived]
-        impl ::stratodb::data::SData for #name {
+        impl #impl_generics ::stratodb::data::SData for #name #ty_generics #where_clause {
             type Ref<'t> = <#into_ty as ::stratodb::data::SData>::Ref<'t>;
             type Mut<'t> = <#into_ty as ::stratodb::data::SData>::Mut<'t>;
 
-            fn store<W: ::stratodb::access::Writer>(
+            fn store<__W: ::stratodb::access::Writer>(
                 &self,
-                writer: &W,
+                writer: &__W,
                 at: &::stratodb::path::SPath,
             ) -> ::stratodb::SdbResult<()> {
                 let target: #into_ty = ::core::convert::Into::into(::core::clone::Clone::clone(self));
@@ -81,8 +89,8 @@ pub(crate) fn convert_impl(input: &DeriveInput, container: &ContainerAttrs) -> S
                 ::stratodb::data::SData::store(&target, writer, at)
             }
 
-            fn load<R: ::stratodb::access::Reader>(
-                reader: &R,
+            fn load<__R: ::stratodb::access::Reader>(
+                reader: &__R,
                 at: &::stratodb::path::SPath,
             ) -> ::stratodb::SdbResult<Self> {
                 #load_body

@@ -4,6 +4,7 @@ use crate::{
     desc::struct_desc,
     enum_data::expand_enum,
     field_parts::FieldParts,
+    generics::Generics,
     index::indexed_impl,
     named_fields::named_fields,
     refs::{mut_type, ref_type},
@@ -12,21 +13,15 @@ use crate::{
 
 use proc_macro2::TokenStream as TokenStream2;
 use quote::{format_ident, quote};
-use syn::{spanned::Spanned, Data, DeriveInput, Error, Result as SynResult};
+use syn::{Data, DeriveInput, Error, Result as SynResult};
 
 pub(super) fn expand_macro(input: DeriveInput) -> SynResult<TokenStream2> {
-    if !input.generics.params.is_empty() {
-        return Err(Error::new(
-            input.generics.span(),
-            "#[derive(SData)] does not support generic types yet",
-        ));
-    }
-
     let container = ContainerAttrs::parse(&input.attrs)?;
+    let generics = Generics::analyze(&input.generics, container.bound());
 
     // `from`/`into`/`try_from` store the type as a target `U`, bypassing shredding.
     if container.delegates() {
-        return convert_impl(&input, &container);
+        return convert_impl(&input, &container, &generics);
     }
 
     // Enums shred to an externally-tagged object; structs to one node per field.
@@ -38,7 +33,7 @@ pub(super) fn expand_macro(input: DeriveInput) -> SynResult<TokenStream2> {
             ));
         }
 
-        return expand_enum(&input, data, &container);
+        return expand_enum(&input, data, &container, &generics);
     }
 
     // `tag`/`content`/`untagged` describe enum representations.
@@ -86,11 +81,11 @@ pub(super) fn expand_macro(input: DeriveInput) -> SynResult<TokenStream2> {
         .map(|p| p.name().to_string())
         .collect();
 
-    let sdata_impl = sdata_impl(name, &ref_name, &mut_name, &parts);
-    let ref_type = ref_type(vis, &ref_name, &parts);
-    let mut_type = mut_type(vis, &mut_name, &parts);
+    let sdata_impl = sdata_impl(name, &ref_name, &mut_name, &parts, &generics);
+    let ref_type = ref_type(vis, &ref_name, &parts, &generics);
+    let mut_type = mut_type(vis, &mut_name, &parts, &generics);
     let desc = struct_desc(vis, &desc_name, &name.to_string(), &field_names);
-    let indexed = indexed_impl(name, &parts, container.indexes())?;
+    let indexed = indexed_impl(name, &parts, container.indexes(), &generics)?;
 
     Ok(quote! {
         #sdata_impl
