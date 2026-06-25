@@ -77,7 +77,7 @@ pub(super) fn expand_macro(input: DeriveInput) -> SynResult<TokenStream2> {
     // The descriptor lists only fields that are part of the stored shape.
     let field_names: Vec<String> = parts
         .iter()
-        .filter(|p| p.attrs().in_shape())
+        .filter(|p| p.attrs().in_shape() && !p.attrs().is_flatten())
         .map(|p| p.name().to_string())
         .collect();
 

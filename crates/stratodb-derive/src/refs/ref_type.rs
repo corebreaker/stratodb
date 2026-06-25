@@ -21,6 +21,21 @@ pub(crate) fn ref_type(
         let ty = p.ty();
         let field = &p.name();
 
+        // A flattened field shares the parent's node: open the accessor right there.
+        if p.attrs().is_flatten() {
+            return quote! {
+                #vis fn #getter(&self) -> ::stratodb::SdbResult<<#ty as ::stratodb::data::SData>::Ref<'t>> {
+                    ::core::result::Result::Ok(
+                        <<#ty as ::stratodb::data::SData>::Ref<'t> as ::stratodb::data::refs::SRef<'t>>::open(
+                            ::std::sync::Arc::clone(&self.reader),
+                            self.base.clone(),
+                            self.key,
+                        ),
+                    )
+                }
+            };
+        }
+
         quote! {
             #vis fn #getter(&self) -> ::stratodb::SdbResult<<#ty as ::stratodb::data::SData>::Ref<'t>> {
                 let at = self.base.child_name(#field);

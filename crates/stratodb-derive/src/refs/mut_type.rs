@@ -21,6 +21,21 @@ pub(crate) fn mut_type(
         let ty = p.ty();
         let field = &p.name();
 
+        // A flattened field shares the parent's node: open the accessor right there.
+        if p.attrs().is_flatten() {
+            return quote! {
+                #vis fn #setter(&self) -> ::stratodb::SdbResult<<#ty as ::stratodb::data::SData>::Mut<'t>> {
+                    ::core::result::Result::Ok(
+                        <<#ty as ::stratodb::data::SData>::Mut<'t> as ::stratodb::data::refs::SMut<'t>>::open(
+                            ::std::sync::Arc::clone(&self.writer),
+                            self.base.clone(),
+                            self.key,
+                        ),
+                    )
+                }
+            };
+        }
+
         quote! {
             #vis fn #setter(&self) -> ::stratodb::SdbResult<<#ty as ::stratodb::data::SData>::Mut<'t>> {
                 let at = self.base.child_name(#field);

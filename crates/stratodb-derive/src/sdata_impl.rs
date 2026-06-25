@@ -20,9 +20,14 @@ pub(crate) fn sdata_impl(
     let store_fields = parts.iter().filter(|p| p.attrs().in_shape()).map(|p| {
         let getter = p.getter();
         let field = p.name();
-        let store = match p.attrs().store_fn() {
-            Some(path) => quote! { #path(&self.#getter, writer, &at.child_name(#field))?; },
-            None => quote! { ::stratodb::data::SData::store(&self.#getter, writer, &at.child_name(#field))?; },
+        let store = if p.attrs().is_flatten() {
+            // Flattened: store the value at the parent's node, merging its fields in.
+            quote! { ::stratodb::data::SData::store(&self.#getter, writer, at)?; }
+        } else {
+            match p.attrs().store_fn() {
+                Some(path) => quote! { #path(&self.#getter, writer, &at.child_name(#field))?; },
+                None => quote! { ::stratodb::data::SData::store(&self.#getter, writer, &at.child_name(#field))?; },
+            }
         };
 
         match p.attrs().skip_store_if() {
@@ -75,6 +80,11 @@ fn load_value(p: &FieldParts) -> TokenStream2 {
     // Never read (`skip`/`skip_store`/`skip_load`): use the default.
     if !attrs.loads_from_node() {
         return attrs.default_expr();
+    }
+
+    // Flattened: the value occupies the parent's node, so load from `at` directly.
+    if attrs.is_flatten() {
+        return quote! { <#ty as ::stratodb::data::SData>::load(reader, at)? };
     }
 
     let load_fn = attrs.load_fn();

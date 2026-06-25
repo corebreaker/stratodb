@@ -1117,3 +1117,65 @@ fn bound_overrides_the_default_sdata_bound() {
         }
     );
 }
+
+#[derive(SData, Debug, PartialEq)]
+struct Meta {
+    created: i64,
+    author:  String,
+}
+
+#[derive(SData, Debug, PartialEq)]
+struct Doc {
+    title: String,
+    #[strato(flatten)]
+    meta:  Meta,
+}
+
+#[test]
+fn flatten_merges_a_nested_struct_into_the_parent() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = StratoDb::create(dir.path().join("doc.stratodb")).unwrap();
+    let table = db.open_table("data").unwrap();
+
+    let w = table.write().unwrap();
+    w.store(
+        "d",
+        &Doc {
+            title: String::from("hello"),
+            meta:  Meta {
+                created: 100,
+                author:  String::from("ada"),
+            },
+        },
+    )
+    .unwrap();
+    w.commit().unwrap();
+
+    let r = table.read().unwrap();
+
+    // `Meta`'s fields are merged into `Doc`'s object — there is no `meta` level.
+    assert_eq!(r.get::<String>("d/title").unwrap(), Some(String::from("hello")));
+    assert_eq!(r.get::<i64>("d/created").unwrap(), Some(100));
+    assert_eq!(r.get::<String>("d/author").unwrap(), Some(String::from("ada")));
+    assert!(!r.exists("d/meta").unwrap());
+
+    // Full roundtrip reassembles the nested struct.
+    assert_eq!(
+        r.load::<Doc>("d").unwrap(),
+        Doc {
+            title: String::from("hello"),
+            meta:  Meta {
+                created: 100,
+                author:  String::from("ada"),
+            },
+        }
+    );
+
+    // The flattened accessor opens at the parent's node.
+    let acc = r.fetch::<StratoDoc>("d").unwrap();
+    assert_eq!(acc.title().unwrap().get().unwrap(), "hello");
+    assert_eq!(acc.meta().unwrap().created().unwrap().get().unwrap(), 100);
+
+    // The descriptor omits the flattened field (its node names are its inner fields').
+    assert_eq!(StratoDocDesc::FIELDS, &["title"]);
+}

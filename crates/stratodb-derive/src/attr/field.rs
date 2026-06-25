@@ -6,7 +6,7 @@ use super::{
 };
 
 use syn::{parse::ParseStream, Attribute, Error, Ident, LitStr, Path, Result as SynResult, Token};
-use proc_macro2::TokenStream as TokenStream2;
+use proc_macro2::{Span, TokenStream as TokenStream2};
 use quote::quote;
 
 /// The `#[strato(...)]` attributes that apply to a single field.
@@ -32,6 +32,8 @@ pub(crate) struct FieldAttrs {
     load_with:     Option<Path>,
     /// Module supplying both `store` and `load` (`with = "module"`); sugar for the two above.
     with:          Option<Path>,
+    /// Flatten the field's (object) value into the parent's node (stored/loaded at the parent's path).
+    flatten:       Option<Span>,
 }
 
 impl FieldAttrs {
@@ -47,6 +49,25 @@ impl FieldAttrs {
 
     /// Rejects attribute combinations that cannot both hold.
     fn check_conflicts(&self) -> SynResult<()> {
+        // A flattened field has no named node of its own, so no other attribute applies.
+        if let Some(span) = self.flatten
+            && (self.rename.is_some()
+                || !self.aliases.is_empty()
+                || self.skip
+                || self.skip_store
+                || self.skip_load
+                || self.skip_store_if.is_some()
+                || self.default.is_some()
+                || self.with.is_some()
+                || self.store_with.is_some()
+                || self.load_with.is_some())
+        {
+            return Err(Error::new(
+                span,
+                "`flatten` cannot be combined with other field attributes",
+            ));
+        }
+
         // `with` already sets both sides; an explicit `store_with`/`load_with` is redundant.
         if self.with.is_some()
             && let Some(dup) = self.store_with.as_ref().or(self.load_with.as_ref())
@@ -132,6 +153,7 @@ impl FieldAttrs {
                     input.parse::<Token![=]>()?;
                     self.with = Some(parse_path_lit(input)?);
                 }
+                "flatten" => self.flatten = Some(key.span()),
                 other => {
                     return Err(Error::new(
                         key.span(),
@@ -189,5 +211,10 @@ impl FieldAttrs {
         self.load_with
             .clone()
             .or_else(|| self.with.as_ref().map(|m| join_path(m, "load")))
+    }
+
+    /// Whether the field is flattened into the parent's node (stored/loaded at the parent's path).
+    pub(crate) fn is_flatten(&self) -> bool {
+        self.flatten.is_some()
     }
 }
