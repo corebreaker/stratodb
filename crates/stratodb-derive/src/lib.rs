@@ -21,6 +21,7 @@
 //! [`index_attr`]).
 
 mod attr;
+mod convert;
 mod desc;
 mod enum_data;
 mod expand_macro;

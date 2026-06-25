@@ -549,3 +549,150 @@ fn store_with_and_load_with_compose_with_default() {
         }
     );
 }
+
+#[derive(SData, Debug, PartialEq, Clone)]
+#[strato(into = "String", try_from = "String")]
+struct Email(String);
+
+impl From<Email> for String {
+    fn from(email: Email) -> String {
+        email.0
+    }
+}
+
+impl TryFrom<String> for Email {
+    type Error = String;
+
+    fn try_from(value: String) -> Result<Self, Self::Error> {
+        if value.contains('@') {
+            Ok(Email(value))
+        } else {
+            Err(format!("not an email address: {value}"))
+        }
+    }
+}
+
+#[test]
+fn into_and_try_from_store_a_newtype_as_its_inner_type() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = StratoDb::create(dir.path().join("email.stratodb")).unwrap();
+    let table = db.open_table("data").unwrap();
+
+    let w = table.write().unwrap();
+    w.store("e", &Email(String::from("ada@example.com"))).unwrap();
+    w.commit().unwrap();
+
+    let r = table.read().unwrap();
+
+    // Stored as a plain String leaf (the `into` target), not as a struct node.
+    assert_eq!(r.get::<String>("e").unwrap(), Some(String::from("ada@example.com")));
+
+    // Load reconstructs through `TryFrom`.
+    assert_eq!(r.load::<Email>("e").unwrap(), Email(String::from("ada@example.com")));
+}
+
+#[test]
+fn try_from_rejects_an_invalid_stored_value() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = StratoDb::create(dir.path().join("email_bad.stratodb")).unwrap();
+    let table = db.open_table("data").unwrap();
+
+    // A bare String that is not a valid Email, written directly.
+    let w = table.write().unwrap();
+    w.store("e", &String::from("not-an-email")).unwrap();
+    w.commit().unwrap();
+
+    let r = table.read().unwrap();
+
+    // The failed `TryFrom` surfaces as `SdbError::Conversion`.
+    let error = r.load::<Email>("e").unwrap_err();
+    assert!(matches!(error, stratodb::SdbError::Conversion(_)));
+}
+
+#[derive(SData, Debug, PartialEq, Clone)]
+#[strato(into = "Vec<i64>", from = "Vec<i64>")]
+struct Point {
+    x: i64,
+    y: i64,
+}
+
+impl From<Point> for Vec<i64> {
+    fn from(point: Point) -> Vec<i64> {
+        vec![point.x, point.y]
+    }
+}
+
+impl From<Vec<i64>> for Point {
+    fn from(values: Vec<i64>) -> Point {
+        Point {
+            x: values[0],
+            y: values[1],
+        }
+    }
+}
+
+#[test]
+fn into_and_from_store_a_struct_under_a_different_shape() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = StratoDb::create(dir.path().join("point.stratodb")).unwrap();
+    let table = db.open_table("data").unwrap();
+
+    let w = table.write().unwrap();
+    w.store(
+        "p",
+        &Point {
+            x: 3, y: 7
+        },
+    )
+    .unwrap();
+    w.commit().unwrap();
+
+    let r = table.read().unwrap();
+
+    // Stored as a `Vec<i64>` list, not as an object with `x`/`y` fields.
+    assert_eq!(r.get::<i64>("p[0]").unwrap(), Some(3));
+    assert_eq!(r.get::<i64>("p[1]").unwrap(), Some(7));
+    assert!(!r.exists("p/x").unwrap());
+
+    assert_eq!(
+        r.load::<Point>("p").unwrap(),
+        Point {
+            x: 3, y: 7
+        }
+    );
+}
+
+#[derive(SData, Debug, PartialEq)]
+struct Account {
+    email: Email,
+}
+
+#[test]
+fn delegated_field_exposes_the_target_types_accessor() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = StratoDb::create(dir.path().join("account.stratodb")).unwrap();
+    let table = db.open_table("data").unwrap();
+
+    let w = table.write().unwrap();
+    w.store(
+        "acc",
+        &Account {
+            email: Email(String::from("grace@example.com")),
+        },
+    )
+    .unwrap();
+    w.commit().unwrap();
+
+    let r = table.read().unwrap();
+
+    // `Email`'s accessor IS `String`'s: the getter yields a `Leaf<String>`.
+    let acc = r.fetch::<StratoAccount>("acc").unwrap();
+    assert_eq!(acc.email().unwrap().get().unwrap(), "grace@example.com");
+
+    assert_eq!(
+        r.load::<Account>("acc").unwrap(),
+        Account {
+            email: Email(String::from("grace@example.com")),
+        }
+    );
+}

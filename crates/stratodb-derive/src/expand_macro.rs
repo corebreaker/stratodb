@@ -1,5 +1,6 @@
 use crate::{
     attr::{ContainerAttrs, FieldAttrs},
+    convert::convert_impl,
     desc::struct_desc,
     enum_data::expand_enum,
     field_parts::FieldParts,
@@ -22,6 +23,11 @@ pub(super) fn expand_macro(input: DeriveInput) -> SynResult<TokenStream2> {
     }
 
     let container = ContainerAttrs::parse(&input.attrs)?;
+
+    // `from`/`into`/`try_from` store the type as a target `U`, bypassing shredding.
+    if container.delegates() {
+        return convert_impl(&input, &container);
+    }
 
     // Enums shred to an externally-tagged object; structs to one node per field.
     if let Data::Enum(data) = &input.data {

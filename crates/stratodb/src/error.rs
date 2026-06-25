@@ -96,6 +96,10 @@ pub enum SdbError {
     /// A data access cannot be fulfilled.
     #[error("impossible access: {0}")]
     CannotAccess(String),
+
+    /// A `try_from` conversion (`#[strato(try_from = ...)]`) rejected a loaded value.
+    #[error("conversion failed: {0}")]
+    Conversion(String),
 }
 
 impl SdbError {

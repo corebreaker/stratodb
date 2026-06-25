@@ -1,8 +1,13 @@
 use proc_macro2::Span;
-use syn::{parse::ParseStream, Ident, LitStr, Path, PathSegment, Result as SynResult};
+use syn::{parse::ParseStream, Ident, LitStr, Path, PathSegment, Result as SynResult, Type};
 
 /// Parses a string literal holding a path: `"a::b"` parses to the path `a::b`.
 pub(super) fn parse_path_lit(input: ParseStream) -> SynResult<Path> {
+    input.parse::<LitStr>()?.parse()
+}
+
+/// Parses a string literal holding a type: `"Vec<u8>"` parses to the type `Vec<u8>`.
+pub(super) fn parse_type_lit(input: ParseStream) -> SynResult<Type> {
     input.parse::<LitStr>()?.parse()
 }
 
