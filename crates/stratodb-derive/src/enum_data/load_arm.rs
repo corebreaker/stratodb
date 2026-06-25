@@ -1,15 +1,16 @@
-use super::variant_parts::VariantParts;
+use super::{repr::EnumRepr, variant_parts::VariantParts};
 use proc_macro2::TokenStream as TokenStream2;
 use quote::quote;
 use syn::Fields;
 
 /// A `match tag` arm that rebuilds one variant from its stored payload. The arm
-/// matches the primary tag and every alias; the payload is read from the tag
-/// actually present (so a value stored under an alias resolves to its subtree).
-pub(super) fn load_arm(parts: &VariantParts) -> TokenStream2 {
+/// matches the primary tag and every alias; the payload is read from the
+/// representation's base path.
+pub(super) fn load_arm(parts: &VariantParts, repr: &EnumRepr) -> TokenStream2 {
     let id = parts.ident();
     let tag = parts.tag();
     let aliases = parts.aliases();
+    let base = repr.payload_base_load();
 
     match parts.fields() {
         Fields::Unit => quote! {
@@ -20,7 +21,7 @@ pub(super) fn load_arm(parts: &VariantParts) -> TokenStream2 {
 
             quote! {
                 #tag #(| #aliases)* => ::core::result::Result::Ok(Self::#id(
-                    <#ty as ::stratodb::data::SData>::load(reader, &at.child_name(tag.as_str()))?,
+                    <#ty as ::stratodb::data::SData>::load(reader, &#base)?,
                 )),
             }
         }
@@ -34,7 +35,7 @@ pub(super) fn load_arm(parts: &VariantParts) -> TokenStream2 {
 
             quote! {
                 #tag #(| #aliases)* => {
-                    let payload = at.child_name(tag.as_str());
+                    let payload = #base;
                     ::core::result::Result::Ok(Self::#id( #(#loads),* ))
                 }
             }
@@ -50,7 +51,7 @@ pub(super) fn load_arm(parts: &VariantParts) -> TokenStream2 {
 
             quote! {
                 #tag #(| #aliases)* => {
-                    let payload = at.child_name(tag.as_str());
+                    let payload = #base;
                     ::core::result::Result::Ok(Self::#id { #(#inits),* })
                 }
             }

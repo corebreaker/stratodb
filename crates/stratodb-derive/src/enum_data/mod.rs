@@ -15,6 +15,7 @@
 mod accessors;
 mod expand_macro;
 mod load_arm;
+mod repr;
 mod store_arm;
 mod variant_parts;
 

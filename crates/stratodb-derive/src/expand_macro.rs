@@ -38,7 +38,15 @@ pub(super) fn expand_macro(input: DeriveInput) -> SynResult<TokenStream2> {
             ));
         }
 
-        return expand_enum(&input, data, container.rename_all());
+        return expand_enum(&input, data, &container);
+    }
+
+    // `tag`/`content`/`untagged` describe enum representations.
+    if container.tag().is_some() || container.content().is_some() || container.untagged() {
+        return Err(Error::new(
+            input.ident.span(),
+            "`tag`/`content`/`untagged` are only supported on enums",
+        ));
     }
 
     let fields = named_fields(&input)?;

@@ -1,22 +1,31 @@
-use super::variant_parts::VariantParts;
+use super::{repr::EnumRepr, variant_parts::VariantParts};
 use proc_macro2::TokenStream as TokenStream2;
 use quote::{format_ident, quote};
 use syn::{Fields, Ident};
 
-/// A `match self` arm that writes one variant's payload under its tag.
-pub(super) fn store_arm(parts: &VariantParts) -> TokenStream2 {
+/// A `match self` arm that writes one variant's tag and payload per the
+/// representation. The tag goes to the object key (external) or a named field
+/// (adjacent); the payload lands under the representation's base path.
+pub(super) fn store_arm(parts: &VariantParts, repr: &EnumRepr) -> TokenStream2 {
     let id = parts.ident();
     let tag = parts.tag();
+    let tag_store = repr.tag_store(tag);
+    let base = repr.payload_base_store(tag);
 
     match parts.fields() {
-        Fields::Unit => quote! {
-            Self::#id => {
-                ::stratodb::access::Writer::put_scalar(writer, &at.child_name(#tag), ::stratodb::data::Scalar::Null)?;
+        Fields::Unit => {
+            let unit_body = repr.unit_store(tag);
+
+            quote! {
+                Self::#id => {
+                    #unit_body
+                }
             }
-        },
+        }
         Fields::Unnamed(fields) if fields.unnamed.len() == 1 => quote! {
             Self::#id(inner) => {
-                ::stratodb::data::SData::store(inner, writer, &at.child_name(#tag))?;
+                #tag_store
+                ::stratodb::data::SData::store(inner, writer, &#base)?;
             }
         },
         Fields::Unnamed(fields) => {
@@ -29,7 +38,8 @@ pub(super) fn store_arm(parts: &VariantParts) -> TokenStream2 {
 
             quote! {
                 Self::#id( #(#binds),* ) => {
-                    let payload = at.child_name(#tag);
+                    #tag_store
+                    let payload = #base;
                     ::stratodb::access::Writer::ensure_container(writer, &payload, true)?;
                     #(#stores)*
                 }
@@ -41,7 +51,8 @@ pub(super) fn store_arm(parts: &VariantParts) -> TokenStream2 {
 
             quote! {
                 Self::#id { #(#names),* } => {
-                    let payload = at.child_name(#tag);
+                    #tag_store
+                    let payload = #base;
                     ::stratodb::access::Writer::ensure_container(writer, &payload, false)?;
                     #( ::stratodb::data::SData::store(#names, writer, &payload.child_name(#name_strs))?; )*
                 }

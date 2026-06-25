@@ -1,9 +1,14 @@
+use super::repr::EnumRepr;
 use proc_macro2::TokenStream as TokenStream2;
 use quote::quote;
 use syn::Ident;
 
-/// The minimal read/write accessors over an enum node: both expose `variant()`.
-pub(super) fn accessors(vis: &syn::Visibility, ref_name: &Ident, mut_name: &Ident) -> TokenStream2 {
+/// The minimal read/write accessors over an enum node: both expose `variant()`,
+/// which reads the active tag the way the representation stored it.
+pub(super) fn accessors(vis: &syn::Visibility, ref_name: &Ident, mut_name: &Ident, repr: &EnumRepr) -> TokenStream2 {
+    let ref_variant = repr.variant_body(quote! { self.reader });
+    let mut_variant = repr.variant_body(quote! { self.writer });
+
     quote! {
         #[allow(dead_code)]
         #vis struct #ref_name<'t> {
@@ -16,12 +21,7 @@ pub(super) fn accessors(vis: &syn::Visibility, ref_name: &Ident, mut_name: &Iden
         impl<'t> #ref_name<'t> {
             /// The name of the currently-stored variant.
             #vis fn variant(&self) -> ::stratodb::SdbResult<::std::string::String> {
-                ::stratodb::access::Reader::object_keys(&self.reader, self.key)?
-                    .into_iter()
-                    .next()
-                    .ok_or_else(|| {
-                        ::stratodb::SdbError::Corrupt(::std::string::String::from("enum node has no variant tag"))
-                    })
+                #ref_variant
             }
         }
 
@@ -62,12 +62,7 @@ pub(super) fn accessors(vis: &syn::Visibility, ref_name: &Ident, mut_name: &Iden
         impl<'t> #mut_name<'t> {
             /// The name of the currently-stored variant.
             #vis fn variant(&self) -> ::stratodb::SdbResult<::std::string::String> {
-                ::stratodb::access::Reader::object_keys(&self.writer, self.key)?
-                    .into_iter()
-                    .next()
-                    .ok_or_else(|| {
-                        ::stratodb::SdbError::Corrupt(::std::string::String::from("enum node has no variant tag"))
-                    })
+                #mut_variant
             }
         }
 

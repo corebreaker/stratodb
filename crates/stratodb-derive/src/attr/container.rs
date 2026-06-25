@@ -13,6 +13,9 @@ pub(crate) struct ContainerAttrs {
     from:       Option<Type>,
     into:       Option<Type>,
     try_from:   Option<Type>,
+    tag:        Option<String>,
+    content:    Option<String>,
+    untagged:   bool,
 }
 
 impl ContainerAttrs {
@@ -50,6 +53,15 @@ impl ContainerAttrs {
                     input.parse::<Token![=]>()?;
                     self.try_from = Some(parse_type_lit(input)?);
                 }
+                "tag" => {
+                    input.parse::<Token![=]>()?;
+                    self.tag = Some(input.parse::<LitStr>()?.value());
+                }
+                "content" => {
+                    input.parse::<Token![=]>()?;
+                    self.content = Some(input.parse::<LitStr>()?.value());
+                }
+                "untagged" => self.untagged = true,
                 other => {
                     return Err(Error::new(
                         key.span(),
@@ -94,5 +106,20 @@ impl ContainerAttrs {
     /// Whether any of `from`/`into`/`try_from` makes this a delegated (stored-as-`U`) type.
     pub(crate) fn delegates(&self) -> bool {
         self.from.is_some() || self.into.is_some() || self.try_from.is_some()
+    }
+
+    /// The `tag` field name for an internally/adjacently tagged enum.
+    pub(crate) fn tag(&self) -> Option<&str> {
+        self.tag.as_deref()
+    }
+
+    /// The `content` field name for an adjacently tagged enum.
+    pub(crate) fn content(&self) -> Option<&str> {
+        self.content.as_deref()
+    }
+
+    /// Whether the enum is untagged (payload stored bare, tried in order on load).
+    pub(crate) fn untagged(&self) -> bool {
+        self.untagged
     }
 }

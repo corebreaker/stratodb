@@ -1,29 +1,29 @@
 use super::{accessors::accessors, load_arm::load_arm, store_arm::store_arm, variant_parts::VariantParts};
-use crate::{attr::RenameRule, desc::enum_desc};
+use crate::{attr::ContainerAttrs, desc::enum_desc};
 use proc_macro2::TokenStream as TokenStream2;
 use quote::{format_ident, quote};
 use syn::{DataEnum, DeriveInput, Result as SynResult};
 
-pub(crate) fn expand_enum(
-    input: &DeriveInput,
-    data: &DataEnum,
-    rename_all: Option<RenameRule>,
-) -> SynResult<TokenStream2> {
+pub(crate) fn expand_enum(input: &DeriveInput, data: &DataEnum, container: &ContainerAttrs) -> SynResult<TokenStream2> {
     let vis = &input.vis;
     let name = &input.ident;
     let ref_name = format_ident!("Strato{}", name);
     let mut_name = format_ident!("Strato{}Mut", name);
     let desc_name = format_ident!("Strato{}Desc", name);
 
+    let repr = super::repr::EnumRepr::from_container(container, name)?;
+
     let parts = data
         .variants
         .iter()
-        .map(|variant| VariantParts::new(variant, rename_all))
+        .map(|variant| VariantParts::new(variant, container.rename_all()))
         .collect::<SynResult<Vec<_>>>()?;
 
-    let store_arms = parts.iter().map(store_arm);
-    let load_arms = parts.iter().map(load_arm);
-    let variant_names: Vec<String> = parts.iter().map(|p| p.tag().to_string()).collect();
+    let store_arms = parts.iter().map(|part| store_arm(part, &repr));
+    let load_arms = parts.iter().map(|part| load_arm(part, &repr));
+    let variant_names: Vec<String> = parts.iter().map(|part| part.tag().to_string()).collect();
+
+    let tag_load = repr.tag_load();
 
     let sdata_impl = quote! {
         #[automatically_derived]
@@ -36,8 +36,7 @@ pub(crate) fn expand_enum(
                 writer: &W,
                 at: &::stratodb::path::SPath,
             ) -> ::stratodb::SdbResult<()> {
-                // Externally tagged: the node carries exactly one key (the active
-                // variant), so clear any previously-stored variant first.
+                // The node carries exactly one variant, so clear any prior one first.
                 ::stratodb::access::Writer::remove(writer, at)?;
 
                 match self {
@@ -51,15 +50,7 @@ pub(crate) fn expand_enum(
                 reader: &R,
                 at: &::stratodb::path::SPath,
             ) -> ::stratodb::SdbResult<Self> {
-                let key = ::stratodb::access::Reader::resolve(reader, at)?
-                    .ok_or_else(|| ::stratodb::SdbError::PathNotFound(at.clone()))?;
-
-                let tag = ::stratodb::access::Reader::object_keys(reader, key)?
-                    .into_iter()
-                    .next()
-                    .ok_or_else(|| {
-                        ::stratodb::SdbError::Corrupt(::std::string::String::from("enum node has no variant tag"))
-                    })?;
+                #tag_load
 
                 match tag.as_str() {
                     #(#load_arms)*
@@ -71,7 +62,7 @@ pub(crate) fn expand_enum(
         }
     };
 
-    let accessors = accessors(vis, &ref_name, &mut_name);
+    let accessors = accessors(vis, &ref_name, &mut_name, &repr);
     let desc = enum_desc(vis, &desc_name, &name.to_string(), &variant_names);
 
     Ok(quote! {

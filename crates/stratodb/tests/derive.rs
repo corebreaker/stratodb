@@ -767,3 +767,64 @@ fn enum_variant_alias_is_accepted_on_load() {
         }
     );
 }
+
+#[derive(SData, Debug, PartialEq)]
+#[strato(tag = "kind", content = "payload")]
+enum Cmd {
+    Stop,
+    Echo(String),
+    Sum(i64, i64),
+    Spawn { name: String, count: u32 },
+}
+
+#[test]
+fn adjacently_tagged_enum_lays_out_tag_and_content_and_roundtrips() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = StratoDb::create(dir.path().join("cmd.stratodb")).unwrap();
+    let table = db.open_table("data").unwrap();
+
+    let w = table.write().unwrap();
+    w.store("stop", &Cmd::Stop).unwrap();
+    w.store("echo", &Cmd::Echo(String::from("hi"))).unwrap();
+    w.store("sum", &Cmd::Sum(2, 3)).unwrap();
+    w.store(
+        "spawn",
+        &Cmd::Spawn {
+            name:  String::from("w"),
+            count: 4,
+        },
+    )
+    .unwrap();
+    w.commit().unwrap();
+
+    let r = table.read().unwrap();
+
+    // Tag in the `kind` field, payload in `payload`; a unit variant has no content.
+    assert_eq!(r.get::<String>("stop/kind").unwrap(), Some(String::from("Stop")));
+    assert!(!r.exists("stop/payload").unwrap());
+
+    assert_eq!(r.get::<String>("echo/kind").unwrap(), Some(String::from("Echo")));
+    assert_eq!(r.get::<String>("echo/payload").unwrap(), Some(String::from("hi")));
+
+    assert_eq!(r.get::<String>("sum/kind").unwrap(), Some(String::from("Sum")));
+    assert_eq!(r.get::<i64>("sum/payload[0]").unwrap(), Some(2));
+    assert_eq!(r.get::<i64>("sum/payload[1]").unwrap(), Some(3));
+
+    assert_eq!(r.get::<String>("spawn/kind").unwrap(), Some(String::from("Spawn")));
+    assert_eq!(r.get::<u32>("spawn/payload/count").unwrap(), Some(4));
+
+    // Roundtrips through every variant shape.
+    assert_eq!(r.load::<Cmd>("stop").unwrap(), Cmd::Stop);
+    assert_eq!(r.load::<Cmd>("echo").unwrap(), Cmd::Echo(String::from("hi")));
+    assert_eq!(r.load::<Cmd>("sum").unwrap(), Cmd::Sum(2, 3));
+    assert_eq!(
+        r.load::<Cmd>("spawn").unwrap(),
+        Cmd::Spawn {
+            name:  String::from("w"),
+            count: 4,
+        }
+    );
+
+    // The accessor reads the tag from the `kind` field, not the object key.
+    assert_eq!(r.fetch::<StratoCmd>("echo").unwrap().variant().unwrap(), "Echo");
+}
