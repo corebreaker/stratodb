@@ -33,7 +33,7 @@ pub(super) fn expand_macro(input: DeriveInput) -> SynResult<TokenStream2> {
     if let Data::Enum(data) = &input.data {
         if let Some(index) = container.indexes().first() {
             return Err(Error::new(
-                index.name.span(),
+                index.name().span(),
                 "#[strato(index(...))] is only supported on structs",
             ));
         }

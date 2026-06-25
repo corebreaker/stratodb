@@ -143,12 +143,12 @@ impl WriteTxn {
         } = self;
 
         let guard = inner
-            .version_lock
+            .version_lock()
             .write()
             .map_err(|err| SdbError::CannotAccess(format!("version lock poisoned: {err}")))?;
 
         txn.commit()?;
-        inner.generation.fetch_add(1, Ordering::Release);
+        inner.generation().fetch_add(1, Ordering::Release);
         drop(guard);
 
         Ok(())

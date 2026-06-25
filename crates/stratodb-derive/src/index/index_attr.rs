@@ -15,9 +15,9 @@ use syn::{parse::ParseStream, punctuated::Punctuated, Error, LitStr, Result as S
 
 /// A parsed `index(name = "...", columns(...), unique)` declaration.
 pub(crate) struct IndexAttr {
-    pub(crate) name:    LitStr,
-    pub(crate) columns: Vec<ColumnSpec>,
-    pub(crate) unique:  bool,
+    name:    LitStr,
+    columns: Vec<ColumnSpec>,
+    unique:  bool,
 }
 
 impl IndexAttr {
@@ -50,5 +50,17 @@ impl IndexAttr {
             columns,
             unique,
         })
+    }
+
+    pub(crate) fn name(&self) -> &LitStr {
+        &self.name
+    }
+
+    pub(crate) fn columns(&self) -> &Vec<ColumnSpec> {
+        &self.columns
+    }
+
+    pub(crate) fn unique(&self) -> bool {
+        self.unique
     }
 }

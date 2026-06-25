@@ -1,5 +1,4 @@
 use crate::attr::ContainerAttrs;
-
 use proc_macro2::{Ident, TokenStream as TokenStream2};
 use quote::quote;
 use syn::{Error, Result as SynResult};

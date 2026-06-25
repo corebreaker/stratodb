@@ -20,7 +20,7 @@ pub(crate) fn convert_impl(input: &DeriveInput, container: &ContainerAttrs) -> S
     // Index columns name a struct's fields; a delegated type exposes none.
     if let Some(index) = container.indexes().first() {
         return Err(Error::new(
-            index.name.span(),
+            index.name().span(),
             "`#[strato(index(...))]` is incompatible with `from`/`into`/`try_from`",
         ));
     }

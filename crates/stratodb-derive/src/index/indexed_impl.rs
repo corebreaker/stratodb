@@ -14,7 +14,7 @@ use syn::{Error, Ident, Result as SynResult};
 /// [`Table::create_indexes`] works uniformly.
 pub(crate) fn indexed_impl(name: &Ident, parts: &[FieldParts], indexes: &[IndexAttr]) -> SynResult<TokenStream2> {
     for index in indexes {
-        for column in &index.columns {
+        for column in index.columns() {
             if !parts.iter().any(|part| part.getter() == column.field()) {
                 return Err(Error::new(
                     column.field().span(),
@@ -25,9 +25,9 @@ pub(crate) fn indexed_impl(name: &Ident, parts: &[FieldParts], indexes: &[IndexA
     }
 
     let defs = indexes.iter().map(|index| {
-        let index_name = &index.name;
-        let unique = index.unique;
-        let columns = index.columns.iter().map(|column| {
+        let index_name = index.name();
+        let unique = index.unique();
+        let columns = index.columns().iter().map(|column| {
             let field = parts
                 .iter()
                 .find(|part| part.getter() == column.field())

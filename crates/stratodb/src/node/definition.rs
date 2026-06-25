@@ -1,5 +1,4 @@
-//! The node model: the unit addressed by a primary key.
-
+use super::NodeKind;
 use crate::{
     codec::{self, Reader},
     error::{SdbError, SdbResult},
@@ -13,28 +12,6 @@ mod tag {
     pub(super) const OBJECT: u8 = 0;
     pub(super) const LIST: u8 = 1;
     pub(super) const LEAF: u8 = 2;
-}
-
-/// The kind of a node, as reported by the public API.
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
-pub enum NodeKind {
-    /// A map from field names to child nodes.
-    Object,
-    /// A zero-based sequence of child nodes.
-    List,
-    /// A single scalar value.
-    Leaf,
-}
-
-impl NodeKind {
-    /// A short, stable label used in diagnostics.
-    pub(crate) fn as_str(self) -> &'static str {
-        match self {
-            NodeKind::Object => "object",
-            NodeKind::List => "list",
-            NodeKind::Leaf => "leaf",
-        }
-    }
 }
 
 /// A stored node: either a container (object/list) of child keys, or a leaf.
