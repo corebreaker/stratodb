@@ -40,6 +40,10 @@ pub enum SdbError {
         found:    &'static str,
     },
 
+    /// A byte slice or string could not be converted into a valid [`Skey`](crate::Skey).
+    #[error("invalid key: {0}")]
+    BadKey(String),
+
     /// A scalar could not be read as the requested Rust type.
     #[error("type mismatch: expected {expected}, found {found}")]
     TypeMismatch {

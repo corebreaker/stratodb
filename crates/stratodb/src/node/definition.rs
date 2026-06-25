@@ -42,7 +42,7 @@ impl Node {
 
                 for (name, key) in map {
                     codec::put_bytes(buf, name.as_bytes());
-                    buf.extend_from_slice(&key.to_bytes());
+                    buf.extend_from_slice(&key.into_bytes());
                 }
             }
             Node::List(items) => {
@@ -50,7 +50,7 @@ impl Node {
                 codec::put_u32(buf, items.len() as u32);
 
                 for key in items {
-                    buf.extend_from_slice(&key.to_bytes());
+                    buf.extend_from_slice(&key.into_bytes());
                 }
             }
             Node::Leaf(scalar) => {

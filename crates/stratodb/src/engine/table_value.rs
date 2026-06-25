@@ -40,7 +40,7 @@ impl TableValue {
             }
             TableValue::Skey(skey) => {
                 buf.push(tag::SKEY);
-                buf.extend_from_slice(&skey.to_bytes());
+                buf.extend_from_slice(&skey.into_bytes());
             }
             TableValue::Unit => buf.push(tag::UNIT),
         }

@@ -10,6 +10,7 @@ use crate::{
     access::{Reader, Writer},
     error::{SdbError, SdbResult},
     path::SPath,
+    Skey,
 };
 
 use chrono::{DateTime, NaiveDate, NaiveTime, TimeDelta, Utc};
@@ -103,6 +104,25 @@ impl SValue for isize {
             Scalar::I64(v) => Ok(*v as isize),
             other => Err(SdbError::TypeMismatch {
                 expected: "isize",
+                found:    other.type_str(),
+            }),
+        }
+    }
+}
+
+impl SValue for Skey {
+    fn to_scalar(&self) -> Scalar {
+        Scalar::Uuid((*self).into())
+    }
+
+    fn from_scalar(scalar: &Scalar) -> SdbResult<Self> {
+        match scalar {
+            Scalar::Uuid(uuid) => Ok(Skey::from_bytes(*uuid.as_bytes())),
+            Scalar::Null => Ok(Skey::ROOT),
+            Scalar::Bytes(v) => Skey::try_from_bytes(v),
+            Scalar::U128(v) => Ok(Skey::from(*v)),
+            other => Err(SdbError::TypeMismatch {
+                expected: "skey",
                 found:    other.type_str(),
             }),
         }
