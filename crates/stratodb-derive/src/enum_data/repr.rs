@@ -1,4 +1,5 @@
 use crate::attr::ContainerAttrs;
+
 use proc_macro2::{Ident, TokenStream as TokenStream2};
 use quote::quote;
 use syn::{Error, Result as SynResult};
@@ -9,6 +10,9 @@ pub(super) enum EnumRepr {
     External,
     /// `{ <tag>: "Variant", <content>: payload }` — tag and payload in named fields.
     Adjacent { tag: String, content: String },
+    /// `{ <tag>: "Variant", ..payload }` — tag and payload flattened into one object;
+    /// tuple/newtype elements are keyed by their decimal index (`"0"`, `"1"`, …).
+    Internal { tag: String },
 }
 
 impl EnumRepr {
@@ -19,10 +23,9 @@ impl EnumRepr {
                 tag:     tag.to_string(),
                 content: content.to_string(),
             }),
-            (Some(_), None, false) => Err(Error::new(
-                name.span(),
-                "internally tagged enums (`tag` without `content`) are not supported yet",
-            )),
+            (Some(tag), None, false) => Ok(Self::Internal {
+                tag: tag.to_string()
+            }),
             (None, Some(_), false) => Err(Error::new(name.span(), "`content` requires `tag`")),
             (_, _, true) => Err(Error::new(name.span(), "untagged enums are not supported yet")),
         }
@@ -35,6 +38,9 @@ impl EnumRepr {
             Self::External => quote! {},
             Self::Adjacent {
                 tag, ..
+            }
+            | Self::Internal {
+                tag,
             } => quote! {
                 ::stratodb::data::SData::store(
                     &::std::string::String::from(#variant_tag),
@@ -56,20 +62,27 @@ impl EnumRepr {
                     ::stratodb::data::Scalar::Null,
                 )?;
             },
-            // Adjacent: just the tag field (a unit variant has no content).
+            // Tagged: just the tag field (a unit variant has no payload).
             Self::Adjacent {
+                ..
+            }
+            | Self::Internal {
                 ..
             } => self.tag_store(variant_tag),
         }
     }
 
-    /// The base path a non-unit variant's payload is written under.
+    /// The base path a non-unit variant's payload is written under. External and
+    /// adjacent only — internal flattens the payload and is handled separately.
     pub(super) fn payload_base_store(&self, variant_tag: &str) -> TokenStream2 {
         match self {
             Self::External => quote! { at.child_name(#variant_tag) },
             Self::Adjacent {
                 content, ..
             } => quote! { at.child_name(#content) },
+            Self::Internal {
+                ..
+            } => unreachable!("internal tagging is handled by internal_store_arm"),
         }
     }
 
@@ -89,19 +102,26 @@ impl EnumRepr {
             },
             Self::Adjacent {
                 tag, ..
+            }
+            | Self::Internal {
+                tag,
             } => quote! {
                 let tag = <::std::string::String as ::stratodb::data::SData>::load(reader, &at.child_name(#tag))?;
             },
         }
     }
 
-    /// The base path a non-unit variant's payload is read from.
+    /// The base path a non-unit variant's payload is read from. External and
+    /// adjacent only — internal flattens the payload and is handled separately.
     pub(super) fn payload_base_load(&self) -> TokenStream2 {
         match self {
             Self::External => quote! { at.child_name(tag.as_str()) },
             Self::Adjacent {
                 content, ..
             } => quote! { at.child_name(#content) },
+            Self::Internal {
+                ..
+            } => unreachable!("internal tagging is handled by internal_load_arm"),
         }
     }
 
@@ -118,6 +138,9 @@ impl EnumRepr {
             },
             Self::Adjacent {
                 tag, ..
+            }
+            | Self::Internal {
+                tag,
             } => quote! {
                 <::std::string::String as ::stratodb::data::SData>::load(&#handle, &self.base.child_name(#tag))
             },

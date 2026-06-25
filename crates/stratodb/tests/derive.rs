@@ -828,3 +828,63 @@ fn adjacently_tagged_enum_lays_out_tag_and_content_and_roundtrips() {
     // The accessor reads the tag from the `kind` field, not the object key.
     assert_eq!(r.fetch::<StratoCmd>("echo").unwrap().variant().unwrap(), "Echo");
 }
+
+#[derive(SData, Debug, PartialEq)]
+#[strato(tag = "type")]
+enum Node {
+    Leaf,
+    Wrap(String),
+    Pair(i64, i64),
+    Branch { left: u32, right: u32 },
+}
+
+#[test]
+fn internally_tagged_enum_flattens_tag_and_payload() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = StratoDb::create(dir.path().join("node.stratodb")).unwrap();
+    let table = db.open_table("data").unwrap();
+
+    let w = table.write().unwrap();
+    w.store("leaf", &Node::Leaf).unwrap();
+    w.store("wrap", &Node::Wrap(String::from("x"))).unwrap();
+    w.store("pair", &Node::Pair(1, 2)).unwrap();
+    w.store(
+        "branch",
+        &Node::Branch {
+            left: 3, right: 4
+        },
+    )
+    .unwrap();
+    w.commit().unwrap();
+
+    let r = table.read().unwrap();
+
+    // Tag in `type`; payload flattened into the same object — tuple/newtype
+    // elements keyed by their decimal index, struct fields by name.
+    assert_eq!(r.get::<String>("leaf/type").unwrap(), Some(String::from("Leaf")));
+
+    assert_eq!(r.get::<String>("wrap/type").unwrap(), Some(String::from("Wrap")));
+    assert_eq!(r.get::<String>("wrap/0").unwrap(), Some(String::from("x")));
+
+    assert_eq!(r.get::<String>("pair/type").unwrap(), Some(String::from("Pair")));
+    assert_eq!(r.get::<i64>("pair/0").unwrap(), Some(1));
+    assert_eq!(r.get::<i64>("pair/1").unwrap(), Some(2));
+
+    assert_eq!(r.get::<String>("branch/type").unwrap(), Some(String::from("Branch")));
+    assert_eq!(r.get::<u32>("branch/left").unwrap(), Some(3));
+    assert_eq!(r.get::<u32>("branch/right").unwrap(), Some(4));
+
+    // Roundtrips through every variant shape.
+    assert_eq!(r.load::<Node>("leaf").unwrap(), Node::Leaf);
+    assert_eq!(r.load::<Node>("wrap").unwrap(), Node::Wrap(String::from("x")));
+    assert_eq!(r.load::<Node>("pair").unwrap(), Node::Pair(1, 2));
+    assert_eq!(
+        r.load::<Node>("branch").unwrap(),
+        Node::Branch {
+            left: 3, right: 4
+        }
+    );
+
+    // The accessor reads the tag from the `type` field.
+    assert_eq!(r.fetch::<StratoNode>("pair").unwrap().variant().unwrap(), "Pair");
+}
