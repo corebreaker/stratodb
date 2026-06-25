@@ -11,7 +11,7 @@ All communication with the user is in **French**. Code, identifiers, comments, d
 StratoDB is a typed, transactional, indexed document store written in Rust, layered over **redb v4.1.0** (kept fully opaque — no redb type ever surfaces in the public API). Data is fully shredded into a tree of typed nodes (objects, lists, scalar leaves), each bearing an opaque `Skey` primary key. Paths (`SPath`) are ephemeral addresses resolved by walking the tree at query time.
 
 Repository: https://github.com/corebreaker/stratodb  
-Working branch: `initial` (will become `main` at release)
+Working branch: `attributes` (derive-attrs milestone); becomes `main` at release.
 
 ---
 
@@ -131,9 +131,9 @@ src/
 ├── constants.rs
 ├── datetime.rs
 ├── cache.rs                PathCache (LRU, per-table, shared across read txns)
-├── db.rs                   StratoDb, DbInner (generation, version_lock)
+├── db/                     StratoDb (database.rs); DbInner (inner.rs: generation, version_lock, caches)
 ├── key.rs                  Skey (opaque 16-byte UUIDv7 primary key)
-├── node.rs                 NodeKind enum + Node (Object/List/Leaf) + encoding
+├── node/                   NodeKind (kind.rs) + Node Object/List/Leaf + encoding (definition.rs)
 ├── table.rs                Table handle → read()/write()/create_index()
 ├── tree.rs                 tree walk, node resolution, list helpers
 ├── codec/                  byte encoding (putters, reader)
@@ -185,23 +185,33 @@ Plus `pub mod`: `data`, `error`, `index`, `path`, `txn`, `access`, `constants`.
 
 ```
 src/
-├── lib.rs                  proc_macro_derive entry point
-│                           #[proc_macro_derive(SData, attributes(strato))]
-├── expand_macro.rs         dispatch: struct → struct pipeline, enum → expand_enum
-├── field_parts.rs          FieldParts<'a> { getter, setter, ty, name }
-├── named_fields.rs         extract named fields; reject tuple/unit structs
+├── lib.rs                  proc_macro_derive entry point #[proc_macro_derive(SData, attributes(strato))]
+├── expand_macro.rs         dispatch: delegated (from/into/try_from) → convert; enum → enum_data; else struct pipeline
+├── convert.rs              from/into/try_from — SData impl stored AS a target type U (no accessors generated)
+├── generics.rs             Generics::analyze — propagate generics + bound onto impls/accessors; `Bounds` alias
+├── field_parts.rs          FieldParts<'a> { getter, setter, ty, name, attrs }
+├── named_fields.rs         extract named fields; reject tuple/unit structs + unions
 ├── desc.rs                 StratoXxxDesc codegen (TYPE_NAME, FIELDS, VARIANTS)
-├── sdata_impl.rs           SData impl codegen (store + load)
+├── sdata_impl.rs           struct SData impl codegen (store + load)
+├── attr/                   #[strato(...)] parsing
+│   ├── container.rs        ContainerAttrs (rename_all, index, from/into/try_from, tag/content/untagged, expecting, bound)
+│   ├── field.rs            FieldAttrs (rename, alias, skip*, default, store_with/load_with/with, flatten)
+│   ├── variant.rs          VariantAttrs (rename, alias, other)
+│   ├── rename.rs           RenameRule (8 casings; apply_to_field / apply_to_variant)
+│   ├── default.rs          FieldDefault (Trait / Path)
+│   └── misc.rs             parse_path_lit / parse_type_lit / join_path / capitalize
 ├── refs/
 │   ├── ref_type.rs         StratoXxx read accessor codegen
 │   └── mut_type.rs         StratoXxxMut write accessor codegen
 ├── enum_data/
-│   ├── expand_macro.rs     enum orchestrator
+│   ├── expand_macro.rs     enum orchestrator (representation + other/expecting)
+│   ├── repr.rs             EnumRepr (External/Adjacent/Internal/Untagged) — tag + payload-base fragments
+│   ├── variant_parts.rs    VariantParts (resolved tag + aliases + other flag)
 │   ├── accessors.rs        generated variant() accessor
-│   ├── store_arm.rs        per-variant store branch
-│   └── load_arm.rs         per-variant load branch
+│   ├── store_arm.rs        per-variant store branch (+ internal_store_arm)
+│   └── load_arm.rs         per-variant load branch (+ internal_load_arm, untagged_arm)
 └── index/
-    ├── index_attr.rs       IndexAttr + index_attrs() — parse #[strato(index(...))]
+    ├── index_attr.rs       IndexAttr (private fields + accessors) — parse #[strato(index(...))]
     ├── indexed_impl.rs     SIndexed impl codegen (index_defs)
     ├── column_spec.rs      column grammar (field [asc|desc])
     └── item.rs             IndexItem (intermediate representation)
@@ -220,7 +230,7 @@ Generated code is fully `::stratodb::`-qualified (no import assumptions; trait m
 | `tests/containers.rs` | — | Vec/Option/BTreeMap/Bytes roundtrips + accessor API |
 | `tests/rooted.rs` | — | RootedRead/RootedWrite, relative paths, scoped index queries |
 | `tests/indexes.rs` | — | index registry, maintenance, query builder, unique enforcement |
-| `tests/derive.rs` | `derive` | #[derive(SData)]: structs, enums, rename/rename_all/alias (planned), skip/default (planned) |
+| `tests/derive.rs` | `derive` | #[derive(SData)]: structs/enums + every `#[strato(...)]` attr (rename/skip/default/with, from/into/try_from, enum reps, generics+bound, flatten) |
 | `tests/index_typed.rs` | `derive` | end-to-end derived indexes (back-fill, composite prefix, unique, reopen) |
 
 ---
@@ -234,62 +244,38 @@ Generated code is fully `::stratodb::`-qualified (no import assumptions; trait m
 | 1 | Foundation: StratoDb, Table, ReadTxn, WriteTxn, SPath, Skey, Node, tree walk, path cache |
 | 2 | SData trait + accessors: SValue/Scalar, Leaf/LeafMut, Vec/Option/BTreeMap/Bytes containers, #[derive(SData)] for structs and enums, StratoXxxDesc |
 | 3 | Secondary indexes: order-preserving codec, IndexDef + registry, maintenance, pattern matching, query builder, unique enforcement, #[strato(index(...))] derive attr, back-fill |
+| derive-attrs | Serde-style `#[strato(...)]` attributes — 7 phases (detailed below) |
 
 Milestone 3 extras (same branch): rooted views (`RootedRead`/`RootedWrite`), `SPath` normalization + `/` operator.
 
-### IN PROGRESS — Derive-attribute parity
+### COMPLETE — Derive-attribute parity
 
-Goal: Serde-style `#[strato(...)]` attributes on `#[derive(SData)]`. Attribute namespace is **`strato`** (declared as `attributes(strato)` in `proc_macro_derive`).
+Serde-style `#[strato(...)]` attributes on `#[derive(SData)]` (namespace **`strato`**), implemented and tested across seven phases (`tests/derive.rs`). Excluded with no analogue: `borrow`, `getter`, `variant_identifier`, `field_identifier` (`load` returns owned values; the `Ref` accessor IS the zero-copy story).
 
-**Scoped decisions (locked):**
-- Include: `skip`, `skip_store`, `skip_load`, `skip_store_if`, `default`, `rename`, `rename_all`, `alias`, `store_with`, `load_with`, `with`, `from`, `into`, `try_from`, `bound(load/store)`, `other` (enum), `expecting`, `flatten`, enum `tag`/`untagged`.
-- Exclude: `borrow`, `getter`, `variant_identifier`, `field_identifier` — no analogue (`load` returns owned values; the Ref accessor IS the zero-copy story).
-- `from`/`into`/`try_from`: implemented; accessors delegate to the target type `U`.
-- Generics + `bound`: done in this milestone (before milestone 4).
+**Phases (all DONE, one tested commit each):**
 
-**Phase plan (each phase = one tested commit):**
+| Phase | Attributes |
+|-------|-----------|
+| 1 | `rename` / `rename_all` (8 Serde casings) / `alias` |
+| 2 | `skip` / `skip_store` / `skip_load` / `skip_store_if` / `default` |
+| 3 | `store_with` / `load_with` / `with` |
+| 4 | `from` / `into` / `try_from` (container-level: the type is stored AS a target `U`, accessors delegate to `U`'s; a failed `try_from` → `SdbError::Conversion`) |
+| 5 | enum reps: `tag` (internally) / `tag`+`content` (adjacently) / `untagged` / `other` catch-all; enum `rename_all`, variant `rename`/`alias`; `expecting` |
+| 6 | generics + `bound` (single override, not a load/store split — there is one `SData` impl) |
+| 7 | `flatten` |
 
-| Phase | Attributes | Status |
-|-------|-----------|--------|
-| 1 | Parsing infra + `rename` / `rename_all` / `alias` | **TODO** |
-| 2 | `skip` / `skip_store` / `skip_load` / `skip_store_if` / `default` | **TODO** |
-| 3 | `store_with` / `load_with` / `with` / `packed` | **TODO** |
-| 4 | `from` / `into` / `try_from` | **TODO** |
-| 5 | Enum: `tag` (internal) / `content` (adjacent) / `untagged` / `other`; enum `rename_all`, variant `rename`/`alias`; `expecting` | **TODO** |
-| 6 | Generics + `bound(load/store)` | **TODO** |
-| 7 | `flatten` | **TODO** |
+**Key implementation facts:**
+- Effective stored name = `rename` > `rename_all(ident)` > the Rust ident; it drives store/load, accessor child-navigation and `Desc::FIELDS`. Getter method names stay the Rust idents.
+- Parsing lives in an `attr/` module: `ContainerAttrs` (type-level), `FieldAttrs` (field), `VariantAttrs` (enum variant), `RenameRule` (`apply_to_field` for snake_case fields, `apply_to_variant` for PascalCase variants); the `index(...)` attr folds in there too.
+- `store_with`/`load_with`/`with` swap the single `SData::store`/`load` call site (signatures mirror `SData` with the value passed explicitly); they compose with `rename`/`alias`/`default`/`skip_store_if`.
+- `from`/`into`/`try_from` route through `convert.rs` (no `StratoXxx`/`Desc` generated, so newtype/tuple structs AND enums are accepted on that path).
+- Enum representations: `enum_data/repr.rs` `EnumRepr`. Internally tagged keys a tuple/newtype payload by decimal index (`"0"`, `"1"`, …) beside the tag field; untagged stores the payload bare and tries each variant in declaration order on load; `other` is a unit catch-all; `expecting` overrides the no-match error.
+- Generics: `generics.rs` `Generics::analyze` propagates a type's generics + a default `T: SData` bound (or `#[strato(bound = "...")]`, which REPLACES it) onto the `SData`/`SIndexed` impls and the accessors (the latter gain a `PhantomData` over unused type params). Generated `store`/`load` name their params `__W`/`__R` to dodge a user param named `W`/`R`.
+- `flatten` stores/loads the field AT the parent's node (its fields merge in); it is a compile error alongside any other field attribute.
 
-**Current derive limitations (before the corresponding phase):**
-- `#[strato]` attributes on enum **variants** and their **fields** are silently ignored until Phase 5. Only type-level `#[strato(index(...))]` and `#[strato(rename_all)]` on structs are read today.
-- **Generics** (`struct Foo<T>`) emit `compile_error!` until Phase 6.
-- **Tuple structs, unit structs, and unions** emit `compile_error!`. Support is not planned for any milestone; the restriction may be lifted later as an unscheduled enhancement.
-- **`#[strato(packed)]`** on a field is silently ignored today. Planned for Phase 3: it makes a `Vec<u8>` field store as a single `Bytes` leaf (no shredding) rather than as a `Vec<u8>` list — equivalent to `#[strato(with = "Bytes")]`.
-
-**Phase 1 design notes:**
-
-Build an `attr/` module in `stratodb-derive/src/` with:
-- `attr/rename.rs` — `RenameRule` enum (Lower/Upper/Pascal/Camel/Snake/ScreamingSnake/Kebab/ScreamingKebab) + `from_lit(&LitStr)` + `apply_to_field(&str) -> String`.
-- `attr/container.rs` — `ContainerAttrs { rename_all: Option<RenameRule>, indexes: Vec<IndexAttr> }` parsed from type-level `#[strato(...)]` items (dispatches `index(...)` to the existing `IndexAttr::from_body`; `rename_all = "..."` here; `tag`/`untagged` deferred to Phase 5).
-- `attr/field.rs` — `FieldAttrs { rename: Option<String>, aliases: Vec<String> }`.
-- `attr/mod.rs` — re-exports `ContainerAttrs`, `FieldAttrs`, `RenameRule`.
-
-`FieldParts` stores the full `FieldAttrs` and exposes `attrs()`. The effective stored name = `rename` > `rename_all(ident)` > `ident.to_string()`. This name drives `store`, `load`, `child_cached`, and `Desc::FIELDS`. Getter method names stay the Rust idents.
-
-`indexed_impl` must receive `&[FieldParts]` (not `&[Ident]`) to resolve each column name to its stored name.
-
-`rename_all` on enums must emit `compile_error!("not supported yet")` until Phase 5; enum variant/field `#[strato]` attrs silently ignored until Phase 5.
-
-**Phase 3 function signatures (store_with / load_with / with / packed):**
-```rust
-// store_with = "path"
-fn store_fn<W: Writer>(value: &Field, writer: &W, at: &SPath) -> SdbResult<()>;
-
-// load_with = "path"
-fn load_fn<R: Reader>(reader: &R, at: &SPath) -> SdbResult<Field>;
-
-// with = "module"  →  module::store + module::load (same signatures)
-```
-These replace the single `SData::store`/`load` call site, composing unchanged with `rename`/`alias`/`default`/`skip_store_if`. `packed` on a `Vec<u8>` field is syntactic sugar for `with = "Bytes"`: it stores the whole field as a single `Bytes` leaf instead of shredding each byte into its own node.
+**Known gaps:**
+- `#[strato(packed)]` is NOT implemented; `#[strato(with = "Bytes")]` covers it (store a `Vec<u8>` as one `Bytes` leaf instead of shredding each byte).
+- Tuple structs, unit structs, and unions still emit `compile_error!` on the normal path (the `from`/`into`/`try_from` path accepts them). Not planned.
 
 ### PAUSED — Milestone 4 (docs and polish)
 
@@ -327,6 +313,6 @@ These are explicitly planned but not assigned to any current milestone. Do not i
 - **PathCache coherence.** `WriteTxn` MUST NOT use the cache. `ReadCursor` is the only cache-backed `Reader`. The four `Box<dyn Reader>` / `Arc<dyn Reader>` / `Box<dyn Writer>` / `Arc<dyn Writer>` forwarding impls MUST forward `child_cached` and `object_keys` explicitly (trait objects bypass the override otherwise).
 - **Index maintenance brackets every mutation.** The delete-then-insert pattern in `reindex_around` means a whole-entity `store` is safe even for unique indexes (the entity's own prior entry is deleted before the new entry is inserted).
 - **`OnceLock` not `OnceCell` on `WriteTxn.indexes`.** `OnceCell` is `!Sync`; `WriteTxn` must be `Sync` because `fetch_mut` returns an `Arc<WriteCursor>`.
-- **Stored name vs getter name.** After Phase 1 of derive-attrs, a field's getter method = Rust ident; its path segment = effective stored name (rename > rename_all > ident). Never conflate the two.
+- **Stored name vs getter name.** A field's getter method = Rust ident; its path segment = the effective stored name (rename > rename_all > ident). Never conflate the two.
 - **Edition 2024 let-chains.** The codebase uses `if let … && …` chains freely; do not downgrade to nested `match`/`if let`.
 - **`cargo +nightly fmt` only.** The `.rustfmt.toml` uses `struct_field_align_threshold`, `enum_discrim_align_threshold`, `imports_granularity`, and other nightly-only keys that stable fmt silently ignores.
