@@ -76,6 +76,15 @@ scalar_value!(NaiveTime, Time, "time");
 scalar_value!(DateTime<Utc>, DateTime, "datetime");
 scalar_value!(TimeDelta, Duration, "duration");
 
+#[cfg(feature = "bigint-as-scalar")]
+scalar_value!(num_bigint::BigInt, BigInt, "bigint");
+
+#[cfg(feature = "bigfloat-as-scalar")]
+scalar_value!(num_bigfloat::BigFloat, BigFloat, "bigfloat");
+
+#[cfg(feature = "rational-as-scalar")]
+scalar_value!(num_rational::BigRational, Rational, "rational");
+
 // Platform-dependent integer widths are normalised to a fixed width so the
 // on-disk format is portable.
 impl SValue for usize {
@@ -190,3 +199,12 @@ scalar_sdata!(NaiveDate);
 scalar_sdata!(NaiveTime);
 scalar_sdata!(DateTime<Utc>);
 scalar_sdata!(TimeDelta);
+
+#[cfg(all(feature = "bigint-as-scalar", feature = "bigint-as-data"))]
+scalar_sdata!(num_bigint::BigInt);
+
+#[cfg(all(feature = "bigfloat-as-scalar", feature = "bigfloat-as-data"))]
+scalar_sdata!(num_bigfloat::BigFloat);
+
+#[cfg(all(feature = "rational-as-scalar", feature = "rational-as-data"))]
+scalar_sdata!(num_rational::BigRational);

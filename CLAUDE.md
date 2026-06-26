@@ -60,6 +60,8 @@ cargo +nightly fmt --check
 
 `tests/derive.rs` and `tests/index_typed.rs` are gated with `#![cfg(feature = "derive")]`; include `--features derive` (or `--all-features`) to run them.
 
+The big-number features need one extra spot-check: `--all-features` turns every `*-as-scalar` on, which compiles out the `*-as-data`-only path in `data/bignum.rs`. Exercise it explicitly with `cargo test -p stratodb --features bignum-as-data` and `cargo clippy --all-targets --features bignum-as-data -- -D warnings`.
+
 Examples:
 
 ```sh
@@ -145,13 +147,14 @@ src/
 ├── data/
 │   ├── definition.rs       SData trait (store/load)
 │   ├── value.rs            SValue trait + macro_rules for scalar impls
-│   ├── scalar.rs           Scalar enum (21 variants)
+│   ├── scalar.rs           Scalar enum (21 base variants + optional BigInt/BigFloat/Rational behind bignum-as-scalar)
 │   ├── sref.rs / smut.rs   SRef / SMut bound traits
 │   ├── leaf_ref.rs / leaf_mut.rs  Leaf<'t,T> / LeafMut<'t,T>
 │   ├── seq.rs              Vec<T> → Seq / SeqMut
 │   ├── map.rs              BTreeMap<String,T> → Map / MapMut
 │   ├── opt.rs              Option<T> → OptRef / OptMut
 │   ├── bytes.rs            Bytes newtype
+│   ├── bignum.rs           SData for BigInt/BigFloat/BigRational as a single Bytes leaf (the -as-data-only path)
 │   └── identifiable.rs     SIdentifiable (key + path from an accessor)
 ├── path/
 │   ├── spath.rs            SPath (immutable slash-separated path; parse normalises ./.. )
@@ -164,7 +167,7 @@ src/
 │   ├── registry/           $metadata registry (create/lookup/list by table)
 │   ├── id.rs               IndexId
 │   ├── indexed.rs          SIndexed trait
-│   ├── ordered.rs          order-preserving Scalar codec
+│   ├── ordered.rs          order-preserving Scalar codec (incl. bignum: length-prefixed int, decimal-float, continued-fraction rational)
 │   ├── pattern.rs          Pattern (*-wildcard) + affected_entities(scope)
 │   └── maintenance.rs      delete + insert (bracket every mutation)
 └── txn/
@@ -234,6 +237,8 @@ Generated code is fully `::stratodb::`-qualified (no import assumptions; trait m
 | `tests/derive.rs` | `derive` | #[derive(SData)]: structs/enums + every `#[strato(...)]` attr (rename/skip/default/with, from/into/try_from, enum reps, generics+bound, flatten) |
 | `tests/index_typed.rs` | `derive` | end-to-end derived indexes (back-fill, composite prefix, unique, reopen) |
 
+Big-number coverage lives in `src` unit tests, not a `tests/` file: `data/scalar.rs` (storage round-trips), `index/ordered.rs` (value ordering), and `data/bignum.rs` (as-data round-trips via an in-memory DB, gated on a `*-as-data`-only combo).
+
 ---
 
 ## Milestone roadmap
@@ -246,6 +251,7 @@ Generated code is fully `::stratodb::`-qualified (no import assumptions; trait m
 | 2 | SData trait + accessors: SValue/Scalar, Leaf/LeafMut, Vec/Option/BTreeMap/Bytes containers, #[derive(SData)] for structs and enums, StratoXxxDesc |
 | 3 | Secondary indexes: order-preserving codec, IndexDef + registry, maintenance, pattern matching, query builder, unique enforcement, #[strato(index(...))] derive attr, back-fill |
 | derive-attrs | Serde-style `#[strato(...)]` attributes — 7 phases (detailed below) |
+| bignum | Optional BigInt / BigFloat / BigRational as `Scalar`/`SValue`/`SData` + order-preserving index codecs (detailed below) |
 
 Milestone 3 extras (same branch): rooted views (`RootedRead`/`RootedWrite`), `SPath` normalization + `/` operator.
 
@@ -278,6 +284,36 @@ Serde-style `#[strato(...)]` attributes on `#[derive(SData)]` (namespace **`stra
 - `#[strato(packed)]` is NOT implemented; `#[strato(with = "Bytes")]` covers it (store a `Vec<u8>` as one `Bytes` leaf instead of shredding each byte).
 - Tuple structs, unit structs, and unions still emit `compile_error!` on the normal path (the `from`/`into`/`try_from` path accepts them). Not planned.
 
+### COMPLETE — Big-number scalars (`bignum`)
+
+Optional support for `num_bigint::BigInt`, `num_bigfloat::BigFloat` (a fixed 40-digit **decimal** float), and `num_rational::BigRational`, behind a feature matrix (`default = []`). Each type has two orthogonal axes — **`-as-scalar`** (native `Scalar` variant + `SValue`) and **`-as-data`** (`SData` impl) — with umbrellas rolling them up:
+
+| Feature | Pulls in | Effect |
+|---------|----------|--------|
+| `bigint-as-scalar` / `bigfloat-as-scalar` / `rational-as-scalar` | the matching `num-*` crate | a `Scalar` variant + `SValue` impl |
+| `bigint-as-data` / `bigfloat-as-data` / `rational-as-data` | the matching `num-*` crate | an `SData` impl |
+| `bignum-as-scalar` / `bignum-as-data` | the three above, respectively | — |
+| `bignum` | both umbrellas | everything |
+
+`rational-as-scalar` and `rational-as-data` also pull in `num-bigint` — a rational is (de)serialised through its `BigInt` numerator/denominator.
+
+**Two storage representations, chosen by feature combo:**
+- **`-as-scalar` + `-as-data`** (e.g. under `bignum`): `SData` is the `scalar_sdata!` macro in `value.rs` — the value stores as one native `Scalar` leaf.
+- **`-as-data` only** (no matching `-as-scalar`): the type is not a `Scalar`, so `data/bignum.rs` provides `SData` by serialising to a single `Bytes` leaf (BigInt = signed-BE; BigRational = length-prefixed numer+denom; BigFloat = tag + sign/exponent/mantissa). `Ref`/`Mut` delegate to `Bytes`'s accessors, so `acc.get()` returns raw `Bytes` — recompose the typed value with `txn.load::<T>(path)`.
+
+**Exact-storage codec** (`scalar.rs`, round-trippable): BigFloat keys the special values by tag (`NaN`/`±∞`/`0`) and stores a finite value as sign + `i8` exponent + decimal-digit mantissa. The check order is `NaN → +∞ → −∞ → 0 → finite` (a sign test alone cannot separate the two infinities).
+
+**Order-preserving index codec** (`ordered.rs`): all three sort by value, so range and unique indexes are both correct.
+- **BigInt**: a sign-class byte (`neg < zero < pos`) then a length-prefixed magnitude (negatives bit-inverted). This is NOT the fixed-width `signed()` helper, which inverts order across a byte-length boundary (it sorted `127` above `128`).
+- **BigFloat**: a value-ordered class tag (`−∞ < neg < 0 < pos < +∞`, NaN parked at the top of the block) then, for finite values, the base-10 exponent of the leading digit followed by the significant digits; the negative body is inverted.
+- **BigRational**: a continued-fraction (Stern-Brocot) encoding — `a0` via the signed-int codec, later terms length-prefixed with **odd-index terms bit-inverted** (a continued fraction decreases in its odd-position terms), and a parity-chosen stop marker so termination sorts on the correct side. The canonical CF (last term ≥ 2) is unique per value, so unique indexes hold too.
+
+**Tested:** storage round-trips in `scalar.rs`; as-data round-trips in `bignum.rs` (via an in-memory DB, under a `*-as-data`-only combo); value ordering in `ordered.rs` (`bigints_order` / `bigfloats_order` / `rationals_order`, each asserting strict ascending **and** descending).
+
+**Known gaps:**
+- BigFloat is num-bigfloat's fixed 40-digit decimal float, not arbitrary-precision binary.
+- A `-as-data`-only accessor's `get()` returns `Bytes`, not the typed value (mirrors the `from`/`into` derive philosophy, where accessors delegate to the target representation).
+
 ### PAUSED — Milestone 4 (docs and polish)
 
 - README (currently a one-liner)
@@ -292,7 +328,7 @@ Runnable examples are already done (`basic.rs`, `indexed.rs`).
 
 These are explicitly planned but not assigned to any current milestone. Do not implement them until explicitly requested.
 
-**`rust_decimal` support** — `Decimal` would be added as a `Scalar` variant and a `SValue` impl, behind an optional Cargo feature `decimal`. Deferred until after milestone 4.
+**`rust_decimal` support** — `Decimal` would be added as a `Scalar` variant and a `SValue` impl, behind an optional Cargo feature `decimal` (following the big-number feature pattern above). Deferred until after milestone 4.
 
 **Schema migration** — Today `$metadata` stores a `format_version` byte but no migration logic exists. A future migration layer would detect version mismatches on `StratoDb::open` and run a registered upgrade path. Not designed yet.
 
@@ -317,3 +353,4 @@ These are explicitly planned but not assigned to any current milestone. Do not i
 - **Stored name vs getter name.** A field's getter method = Rust ident; its path segment = the effective stored name (rename > rename_all > ident). Never conflate the two.
 - **Edition 2024 let-chains.** The codebase uses `if let … && …` chains freely; do not downgrade to nested `match`/`if let`.
 - **`cargo +nightly fmt` only.** The `.rustfmt.toml` uses `struct_field_align_threshold`, `enum_discrim_align_threshold`, `imports_granularity`, and other nightly-only keys that stable fmt silently ignores.
+- **bignum index codecs sort by value — do not "simplify" them.** `ordered.rs` reassigns the BigFloat class tags into value order (unlike the storage tags in `scalar.rs`, where order is irrelevant), encodes BigInt with a length-prefixed magnitude (NOT the fixed-width `signed()` helper), and encodes rationals as continued fractions. Reverting any of these to a fixed-width or bare-magnitude scheme silently corrupts index order across byte-length boundaries.
