@@ -157,6 +157,7 @@ src/
 │   ├── spath.rs            SPath (immutable slash-separated path; parse normalises ./.. )
 │   ├── segment.rs          Segment (field name or list index)
 │   ├── functions.rs
+│   ├── into_path.rs        IntoPath trait — path args accept &str/String/SPath (parsed or used as-is)
 │   └── tail.rs             PathTail trait + / and /= operators on SPath
 ├── index/
 │   ├── definitions/        IndexDef, IndexColumn, Direction

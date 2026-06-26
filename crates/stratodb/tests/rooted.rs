@@ -31,7 +31,7 @@ fn rooted_read_resolves_relative_to_root() {
     w.commit().unwrap();
 
     let r = table.read().unwrap();
-    let alice = r.rooted(root("users/alice"));
+    let alice = r.rooted("users/alice").unwrap();
 
     assert_eq!(alice.get::<i32>("age").unwrap(), Some(30));
     assert_eq!(alice.get::<String>("name").unwrap(), Some(String::from("Alice")));
@@ -39,11 +39,16 @@ fn rooted_read_resolves_relative_to_root() {
     assert!(alice.exists("age").unwrap());
     assert!(!alice.exists("missing").unwrap());
 
+    // `rooted` also accepts an already-built `SPath`, by value or by reference.
+    let by_path = root("users/alice");
+    assert_eq!(r.rooted(&by_path).unwrap().get::<i32>("age").unwrap(), Some(30));
+    assert_eq!(r.rooted(by_path).unwrap().get::<i32>("age").unwrap(), Some(30));
+
     // A leaf accessor, fetched relative to the root.
     assert_eq!(alice.fetch::<Leaf<i32>>("age").unwrap().get().unwrap(), 30);
 
     // Nesting descends further; `load("")` recomposes the node at the root itself.
-    let scores = alice.rooted(root("scores"));
+    let scores = alice.rooted("scores").unwrap();
     assert_eq!(
         scores.load::<BTreeMap<String, i32>>("").unwrap(),
         BTreeMap::from([(String::from("art"), 75), (String::from("math"), 90)])
@@ -57,7 +62,7 @@ fn rooted_write_is_relative_and_persists() {
 
     let w = table.write().unwrap();
     {
-        let alice = w.rooted(root("users/alice"));
+        let alice = w.rooted("users/alice").unwrap();
         alice.put("age", &30i32).unwrap();
         alice
             .store("scores", &BTreeMap::from([(String::from("math"), 90i32)]))
@@ -80,7 +85,7 @@ fn rooted_write_is_relative_and_persists() {
 
     let r = table.read().unwrap();
     assert_eq!(r.get::<i32>("users/alice/age").unwrap(), Some(31));
-    assert_eq!(r.rooted(root("users/alice")).get::<i32>("age").unwrap(), Some(31));
+    assert_eq!(r.rooted("users/alice").unwrap().get::<i32>("age").unwrap(), Some(31));
 }
 
 #[test]
@@ -100,7 +105,7 @@ fn rooted_writes_maintain_indexes() {
     // Writing through a rooted view goes through the same maintenance path.
     let w = users.write().unwrap();
     {
-        let view = w.rooted(root("users"));
+        let view = w.rooted("users").unwrap();
         view.put("alice/age", &30i32).unwrap();
         view.put("bob/age", &30i32).unwrap();
     }
@@ -150,15 +155,15 @@ fn rooted_find_scopes_to_the_subtree() {
     );
 
     // Rooted at a team: only that team's matching members.
-    assert_eq!(count(r.rooted(root("org/eng"))), 1);
-    assert_eq!(count(r.rooted(root("org/sales"))), 1);
+    assert_eq!(count(r.rooted("org/eng").unwrap()), 1);
+    assert_eq!(count(r.rooted("org/sales").unwrap()), 1);
 
     // Rooted above the teams: all of them; nesting composes the same way.
-    assert_eq!(count(r.rooted(root("org"))), 2);
-    assert_eq!(count(r.rooted(root("org")).rooted(root("eng"))), 1);
+    assert_eq!(count(r.rooted("org").unwrap()), 2);
+    assert_eq!(count(r.rooted("org").unwrap().rooted("eng").unwrap()), 1);
 
     // Rooted at a single entity: that entity when it matches, otherwise none.
-    let alice = r.rooted(root("org/eng/members/alice"));
+    let alice = r.rooted("org/eng/members/alice").unwrap();
     assert_eq!(
         alice
             .find::<BTreeMap<String, i32>>("by_age", &[Scalar::I32(30)])
@@ -175,8 +180,8 @@ fn rooted_find_scopes_to_the_subtree() {
     );
 
     // Rooted below the entity depth, or on a non-matching entity: nothing.
-    assert_eq!(count(r.rooted(root("org/eng/members/alice/age"))), 0);
-    assert_eq!(count(r.rooted(root("org/eng/members/bob"))), 0);
+    assert_eq!(count(r.rooted("org/eng/members/alice/age").unwrap()), 0);
+    assert_eq!(count(r.rooted("org/eng/members/bob").unwrap()), 0);
 }
 
 #[test]
@@ -200,7 +205,7 @@ fn rooted_query_builder_scopes_and_reverses() {
 
     let r = org.read().unwrap();
     let ages = |hits: Vec<BTreeMap<String, i32>>| hits.into_iter().map(|m| m["age"]).collect::<Vec<_>>();
-    let eng = r.rooted(root("org/eng"));
+    let eng = r.rooted("org/eng").unwrap();
 
     // The view's query builder is scoped to the root: only eng members, and
     // `reverse` flips the index order (descending by age).

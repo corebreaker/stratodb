@@ -139,13 +139,13 @@ fn scalar_variety_roundtrips_through_storage() {
 
     let w = table.write().unwrap();
     for (path, scalar) in &values {
-        w.put_scalar(path, scalar.clone()).unwrap();
+        w.put_scalar(*path, scalar.clone()).unwrap();
     }
     w.commit().unwrap();
 
     let r = table.read().unwrap();
     for (path, scalar) in &values {
-        assert_eq!(r.get_scalar(path).unwrap().as_ref(), Some(scalar));
+        assert_eq!(r.get_scalar(*path).unwrap().as_ref(), Some(scalar));
     }
 }
 

@@ -14,8 +14,9 @@
 //! a string adds one field name (`a / "x"`). See [`SPath::join`] / [`PathTail`].
 
 mod functions;
+mod into_path;
 mod segment;
 mod spath;
 mod tail;
 
-pub use self::{segment::Segment, spath::SPath, tail::PathTail};
+pub use self::{into_path::IntoPath, segment::Segment, spath::SPath, tail::PathTail};

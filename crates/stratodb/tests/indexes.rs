@@ -212,8 +212,8 @@ fn composite_index_supports_exact_and_prefix_match() {
 
     let w = users.write().unwrap();
     for (name, a, b) in [("x", 1, 5), ("y", 1, 9), ("z", 2, 5)] {
-        w.put(&format!("users/{name}/a"), &a).unwrap();
-        w.put(&format!("users/{name}/b"), &b).unwrap();
+        w.put(format!("users/{name}/a"), &a).unwrap();
+        w.put(format!("users/{name}/b"), &b).unwrap();
     }
     w.commit().unwrap();
 
@@ -299,7 +299,7 @@ fn query_builder_does_prefix_reverse_and_full_scans() {
 
     let w = users.write().unwrap();
     for (name, age) in [("alice", 30), ("bob", 20), ("carol", 30), ("dave", 40)] {
-        w.put(&format!("users/{name}/age"), &age).unwrap();
+        w.put(format!("users/{name}/age"), &age).unwrap();
     }
     w.commit().unwrap();
 

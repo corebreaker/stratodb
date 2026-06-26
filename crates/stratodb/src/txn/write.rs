@@ -12,7 +12,7 @@ use crate::{
         registry::{self, IndexEntry},
     },
     node::NodeKind,
-    path::{SPath, Segment},
+    path::{IntoPath, SPath, Segment},
     tree,
     Skey,
 };
@@ -45,45 +45,43 @@ impl WriteTxn {
     }
 
     /// Stores `value` at `path`, replacing any existing subtree there.
-    pub fn put<V: SValue>(&self, path: &str, value: &V) -> SdbResult<()> {
+    pub fn put<V: SValue>(&self, path: impl IntoPath, value: &V) -> SdbResult<()> {
         self.put_scalar(path, value.to_scalar())
     }
 
     /// Stores a raw scalar at `path`, replacing any existing subtree there.
-    pub fn put_scalar(&self, path: &str, scalar: Scalar) -> SdbResult<()> {
-        let path = SPath::parse(path)?;
-
-        self.put_scalar_path(&path, scalar)
+    pub fn put_scalar(&self, path: impl IntoPath, scalar: Scalar) -> SdbResult<()> {
+        self.put_scalar_path(&path.into_path()?, scalar)
     }
 
     /// Decomposes and stores a whole `value` at `path`, replacing any subtree there.
-    pub fn store<T: SData>(&self, path: &str, value: &T) -> SdbResult<()> {
-        self.store_at(&SPath::parse(path)?, value)
+    pub fn store<T: SData>(&self, path: impl IntoPath, value: &T) -> SdbResult<()> {
+        self.store_at(&path.into_path()?, value)
     }
 
     /// Removes the subtree at `path`, returning whether anything was removed.
-    pub fn remove(&self, path: &str) -> SdbResult<bool> {
-        self.remove_path_at(&SPath::parse(path)?)
+    pub fn remove(&self, path: impl IntoPath) -> SdbResult<bool> {
+        self.remove_path_at(&path.into_path()?)
     }
 
     /// Reads the value at `path` within this transaction, decoded as `V`.
-    pub fn get<V: SValue>(&self, path: &str) -> SdbResult<Option<V>> {
-        self.get_at(&SPath::parse(path)?)
+    pub fn get<V: SValue>(&self, path: impl IntoPath) -> SdbResult<Option<V>> {
+        self.get_at(&path.into_path()?)
     }
 
     /// Reports the kind of node at `path`, if any.
-    pub fn kind(&self, path: &str) -> SdbResult<Option<NodeKind>> {
-        self.kind_at(&SPath::parse(path)?)
+    pub fn kind(&self, path: impl IntoPath) -> SdbResult<Option<NodeKind>> {
+        self.kind_at(&path.into_path()?)
     }
 
     /// Reads a typed write accessor for the value at `path`.
-    pub fn fetch_mut<'t, A: SMut<'t>>(&'t self, path: &str) -> SdbResult<A> {
-        self.fetch_mut_at(&SPath::parse(path)?)
+    pub fn fetch_mut<'t, A: SMut<'t>>(&'t self, path: impl IntoPath) -> SdbResult<A> {
+        self.fetch_mut_at(&path.into_path()?)
     }
 
     /// Recomposes a whole `T` from the subtree at `path`.
-    pub fn load<T: SData>(&self, path: &str) -> SdbResult<T> {
-        self.load_at(&SPath::parse(path)?)
+    pub fn load<T: SData>(&self, path: impl IntoPath) -> SdbResult<T> {
+        self.load_at(&path.into_path()?)
     }
 
     /// Returns a view of this transaction whose paths are relative to `root`.
@@ -91,8 +89,8 @@ impl WriteTxn {
     /// Every path passed to the returned [`RootedWrite`] resolves as `root` then
     /// the path. The view borrows the transaction, so it must be dropped before
     /// [`commit`](WriteTxn::commit) (like a write accessor).
-    pub fn rooted(&self, root: SPath) -> RootedWrite<'_> {
-        RootedWrite::new(self, root)
+    pub fn rooted(&self, root: impl IntoPath) -> SdbResult<RootedWrite<'_>> {
+        Ok(RootedWrite::new(self, root.into_path()?))
     }
 
     // -- path-addressed cores (shared by the `&str` API and rooted views) --

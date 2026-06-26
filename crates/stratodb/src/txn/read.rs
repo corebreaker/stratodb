@@ -9,7 +9,7 @@ use crate::{
     error::{SdbError, SdbResult},
     index::{registry, IndexId, Pattern},
     node::{Node, NodeKind},
-    path::{SPath, Segment},
+    path::{IntoPath, SPath, Segment},
     tree,
     Skey,
 };
@@ -45,43 +45,43 @@ impl ReadTxn {
     }
 
     /// Reads the value at `path`, decoded as `V`.
-    pub fn get<V: SValue>(&self, path: &str) -> SdbResult<Option<V>> {
-        self.get_at(&SPath::parse(path)?)
+    pub fn get<V: SValue>(&self, path: impl IntoPath) -> SdbResult<Option<V>> {
+        self.get_at(&path.into_path()?)
     }
 
     /// Reads the raw scalar at `path`.
-    pub fn get_scalar(&self, path: &str) -> SdbResult<Option<Scalar>> {
-        self.scalar_at_path(&SPath::parse(path)?)
+    pub fn get_scalar(&self, path: impl IntoPath) -> SdbResult<Option<Scalar>> {
+        self.scalar_at_path(&path.into_path()?)
     }
 
     /// Reports the kind of node at `path`, if any.
-    pub fn kind(&self, path: &str) -> SdbResult<Option<NodeKind>> {
-        self.kind_at(&SPath::parse(path)?)
+    pub fn kind(&self, path: impl IntoPath) -> SdbResult<Option<NodeKind>> {
+        self.kind_at(&path.into_path()?)
     }
 
     /// Returns whether a node exists at `path`.
-    pub fn exists(&self, path: &str) -> SdbResult<bool> {
+    pub fn exists(&self, path: impl IntoPath) -> SdbResult<bool> {
         Ok(self.kind(path)?.is_some())
     }
 
     /// Reads a typed read accessor for the value at `path`.
-    pub fn fetch<'t, A: SRef<'t>>(&'t self, path: &str) -> SdbResult<A> {
-        self.fetch_at(&SPath::parse(path)?)
+    pub fn fetch<'t, A: SRef<'t>>(&'t self, path: impl IntoPath) -> SdbResult<A> {
+        self.fetch_at(&path.into_path()?)
     }
 
     /// Recomposes a whole `T` from the subtree at `path`.
-    pub fn load<T: SData>(&self, path: &str) -> SdbResult<T> {
-        self.load_at(&SPath::parse(path)?)
+    pub fn load<T: SData>(&self, path: impl IntoPath) -> SdbResult<T> {
+        self.load_at(&path.into_path()?)
     }
 
     /// Returns a view of this transaction whose paths are relative to `root`.
     ///
     /// Every path passed to the returned [`RootedRead`] resolves as `root` then
-    /// the path, so `txn.rooted(SPath::parse("users/alice")?).get("age")` reads
+    /// the path, so `txn.rooted("users/alice")?.get("age")` reads
     /// `users/alice/age`. The view borrows the transaction. An index query on the
     /// view is scoped to entities at or under `root` (see [`RootedRead::find`]).
-    pub fn rooted(&self, root: SPath) -> RootedRead<'_> {
-        RootedRead::new(self, root)
+    pub fn rooted(&self, root: impl IntoPath) -> SdbResult<RootedRead<'_>> {
+        Ok(RootedRead::new(self, root.into_path()?))
     }
 
     // -- path-addressed cores (shared by the `&str` API and rooted views) --
