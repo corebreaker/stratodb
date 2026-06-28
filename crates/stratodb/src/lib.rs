@@ -43,6 +43,7 @@ pub mod access;
 pub mod constants;
 pub mod data;
 pub mod error;
+pub mod export;
 pub mod index;
 pub mod path;
 pub mod txn;
