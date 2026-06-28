@@ -138,6 +138,7 @@ src/
 ├── node/                   NodeKind (kind.rs) + Node Object/List/Leaf + encoding (definition.rs)
 ├── table.rs                Table handle → read()/write()/create_index()
 ├── tree.rs                 tree walk, node resolution, list helpers
+├── value.rs                Value enum — dynamic Leaf/List/Node tree + get_value/set_value/subtree
 ├── codec/                  byte encoding (putters, reader)
 ├── engine/                 redb table defs, META_TABLE, TableKey/TableValue encoding
 ├── access/
@@ -170,9 +171,17 @@ src/
 │   ├── ordered.rs          order-preserving Scalar codec (incl. bignum: length-prefixed int, decimal-float, continued-fraction rational)
 │   ├── pattern.rs          Pattern (*-wildcard) + affected_entities(scope)
 │   └── maintenance.rs      delete + insert (bracket every mutation)
+├── export/                 JSON/YAML rendering of a Value (the JsonExporter/YamlExporter traits)
+│   ├── exporter.rs         JsonExporter/YamlExporter traits + impls for ReadTxn and Value
+│   ├── json.rs             to_json(&Value, indent) — compact / pretty
+│   ├── yaml.rs             to_yaml(&Value) — block style
+│   ├── scalar.rs           write_scalar — the single lossy Scalar→text step
+│   ├── string.rs           shared double-quoted string escaping
+│   └── base64.rs           minimal RFC 4648 Base64 encoder (Bytes leaves)
 └── txn/
     ├── read.rs             ReadTxn (get/kind/fetch/load/find/query/rooted)
     ├── write.rs            WriteTxn (put/store/remove/commit/rooted + reindex_around)
+    ├── value.rs            ReadTxn::load_value / WriteTxn::store_value (Value ↔ tree; read_value shared with export)
     ├── query.rs            IndexQuery builder (.prefixed/.reversed/.under/.run)
     └── rooted/
         ├── read.rs         RootedRead<'a> (borrows ReadTxn, relative paths)
@@ -180,8 +189,8 @@ src/
 ```
 
 **Public re-exports** (top-level `use stratodb::…`):
-`StratoDb`, `Table`, `SData` (trait + derive macro with feature), `Skey`, `NodeKind`, `SdbError`, `SdbResult`.
-Plus `pub mod`: `data`, `error`, `index`, `path`, `txn`, `access`, `constants`.
+`StratoDb`, `Table`, `SData` (trait + derive macro with feature), `Skey`, `NodeKind`, `Value`, `SdbError`, `SdbResult`.
+Plus `pub mod`: `data`, `error`, `index`, `path`, `txn`, `access`, `constants`, `export` (the `JsonExporter` / `YamlExporter` traits).
 
 ---
 
@@ -234,10 +243,14 @@ Generated code is fully `::stratodb::`-qualified (no import assumptions; trait m
 | `tests/containers.rs` | — | Vec/Option/BTreeMap/Bytes roundtrips + accessor API |
 | `tests/rooted.rs` | — | RootedRead/RootedWrite, relative paths, scoped index queries |
 | `tests/indexes.rs` | — | index registry, maintenance, query builder, unique enforcement |
+| `tests/export.rs` | — | JSON/YAML export of stored subtrees (compact/pretty/block, scalar rendering, missing path, scalar & list roots) |
+| `tests/value.rs` | — | dynamic `Value`: `store_value`/`load_value` round-trips, `get_value`/`set_value`, `Value`'s own `JsonExporter`/`YamlExporter` |
 | `tests/derive.rs` | `derive` | #[derive(SData)]: structs/enums + every `#[strato(...)]` attr (rename/skip/default/with, from/into/try_from, enum reps, generics+bound, flatten) |
 | `tests/index_typed.rs` | `derive` | end-to-end derived indexes (back-fill, composite prefix, unique, reopen) |
 
 Big-number coverage lives in `src` unit tests, not a `tests/` file: `data/scalar.rs` (storage round-trips), `index/ordered.rs` (value ordering), and `data/bignum.rs` (as-data round-trips via an in-memory DB, gated on a `*-as-data`-only combo).
+
+The export writers also carry `src` unit tests: `export/scalar.rs` (each `Scalar`'s text form), `export/json.rs` / `export/yaml.rs` (layout + escaping on hand-built `Value`s), and `export/base64.rs` (RFC 4648 vectors).
 
 ---
 
@@ -252,6 +265,7 @@ Big-number coverage lives in `src` unit tests, not a `tests/` file: `data/scalar
 | 3 | Secondary indexes: order-preserving codec, IndexDef + registry, maintenance, pattern matching, query builder, unique enforcement, #[strato(index(...))] derive attr, back-fill |
 | derive-attrs | Serde-style `#[strato(...)]` attributes — 7 phases (detailed below) |
 | bignum | Optional BigInt / BigFloat / BigRational as `Scalar`/`SValue`/`SData` + order-preserving index codecs (detailed below) |
+| export + Value | Hand-rolled (zero-dep) JSON/YAML export via the `JsonExporter`/`YamlExporter` traits + a dynamic `Value` document type with load/store and path get/set (detailed below) |
 
 Milestone 3 extras (same branch): rooted views (`RootedRead`/`RootedWrite`), `SPath` normalization + `/` operator.
 
@@ -314,6 +328,26 @@ Optional support for `num_bigint::BigInt`, `num_bigfloat::BigFloat` (a fixed 40-
 - BigFloat is num-bigfloat's fixed 40-digit decimal float, not arbitrary-precision binary.
 - A `-as-data`-only accessor's `get()` returns `Bytes`, not the typed value (mirrors the `from`/`into` derive philosophy, where accessors delegate to the target representation).
 
+### COMPLETE — Textual export and the dynamic `Value`
+
+Hand-rolled JSON/YAML export (no serde, no external dependency) plus a dynamic, in-memory document type, `Value`.
+
+**`Value`** (`value.rs`, re-exported at the crate root) — the dynamic mirror of the node tree: `Leaf(Scalar)` / `List(Vec<Value>)` / `Node(BTreeMap<String, Value>)`. It is **faithful** (each leaf keeps its exact `Scalar`), unlike the export projection. Beyond the in-memory helpers (`get`/`at`/`insert`/`push`/`merge`/…), it carries path-addressed access:
+- `get_value(path) -> Option<Value>` — a clone of the subtree at `path`; `None` if a segment leads nowhere, a list index is out of range, or the string does not parse. The root path returns the whole value.
+- `set_value(&mut self, path, value) -> bool` — **atomic and never-destructive**: it creates missing containers (a `Name` segment makes an object, an `Index` a list) and replaces the value *at the destination* (a leaf there IS overwritten — that is the point of a set), but returns `false` and leaves `self` untouched if a segment would traverse an existing leaf *mid-path*, hit the wrong container kind, or grow a list past its end. Built by descending existing nodes with `get_mut` and attaching a freshly-built subtree (`build_fresh`) only on success, so a deep conflict mutates nothing. A fresh list only accepts index `0` (it starts empty).
+- `subtree(&self, &SPath) -> Option<&Value>` (`pub(crate)`) — the borrowing walk shared by `get_value` and the exporter.
+
+**Load/store on transactions** (`txn/value.rs`):
+- `ReadTxn::load_value(path) -> Option<Value>` — walks the resolved subtree into a `Value`; `None` if absent. The walk (`read_value`, `pub(crate)`) is shared with the exporters.
+- `WriteTxn::store_value(path, &Value)` — decomposes a `Value` back into nodes with replace semantics and full index maintenance (it goes through `WriteCursor`, exactly like the typed `store`).
+
+**Export** (`export/` — a public module, `stratodb::export`):
+- Two traits — `JsonExporter { export_to_json(path, indent) }` and `YamlExporter { export_to_yaml(path) }` — implemented by **`ReadTxn`** (renders the stored subtree at `path`; the root of an empty table → `null`, any other absent path → `PathNotFound`) and by **`Value`** (navigates the in-memory subtree at `path`; absent → `PathNotFound`, root → the whole value). `impl IntoPath` in argument position makes the traits **non-dyn-compatible** (intentional; no `dyn` use).
+- The writers walk a `&Value`: `json.rs` (compact when `indent` is `None`, `n`-space pretty for `Some(n)`) and `yaml.rs` (block style, every string double-quoted). Object fields always come out in sorted (`BTreeMap`) order.
+- The **only lossy step** is `scalar.rs::write_scalar`, the single place a `Scalar` becomes text: numbers and booleans verbatim, `null` for null and the non-finite floats (`NaN`, `±∞`), double-quoted otherwise — dates/times as ISO 8601 / RFC 3339, a UUID hyphenated, `Bytes` → Base64 (the minimal `base64.rs`), a duration → decimal seconds, a rational → `num/den`.
+
+There is exactly **one** dynamic value type: an earlier `ExportValue` was folded into `Value` (the export now projects each leaf's `Scalar` at render time instead of pre-projecting into a second type).
+
 ### PAUSED — Milestone 4 (docs and polish)
 
 - README (currently a one-liner)
@@ -354,3 +388,4 @@ These are explicitly planned but not assigned to any current milestone. Do not i
 - **Edition 2024 let-chains.** The codebase uses `if let … && …` chains freely; do not downgrade to nested `match`/`if let`.
 - **`cargo +nightly fmt` only.** The `.rustfmt.toml` uses `struct_field_align_threshold`, `enum_discrim_align_threshold`, `imports_granularity`, and other nightly-only keys that stable fmt silently ignores.
 - **bignum index codecs sort by value — do not "simplify" them.** `ordered.rs` reassigns the BigFloat class tags into value order (unlike the storage tags in `scalar.rs`, where order is irrelevant), encodes BigInt with a length-prefixed magnitude (NOT the fixed-width `signed()` helper), and encodes rationals as continued fractions. Reverting any of these to a fixed-width or bare-magnitude scheme silently corrupts index order across byte-length boundaries.
+- **One dynamic value type.** `Value` (faithful: `Leaf(Scalar)`/`List`/`Node`) is the only dynamic document type. The export writers project each leaf at render time through the single, lossy `export/scalar.rs::write_scalar` site — do NOT reintroduce a parallel "export value" type. `ReadTxn::read_value` is the one tree→`Value` walk, shared by `load_value` and the exporters.
