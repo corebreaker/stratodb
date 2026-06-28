@@ -37,6 +37,7 @@ mod key;
 mod node;
 mod table;
 mod tree;
+mod value;
 
 pub mod access;
 pub mod constants;
@@ -53,6 +54,7 @@ pub use self::{
     key::Skey,
     node::NodeKind,
     table::Table,
+    value::Value,
 };
 
 /// Derives [`SData`] for a struct, generating its lazy `StratoXxx` /

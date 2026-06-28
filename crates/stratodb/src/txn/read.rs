@@ -36,7 +36,7 @@ impl ReadTxn {
     }
 
     /// Opens the underlying table, or `None` if it has never been written.
-    fn open(&self) -> SdbResult<Option<ReadOnlyTable<TableKey, TableValue>>> {
+    pub(super) fn open(&self) -> SdbResult<Option<ReadOnlyTable<TableKey, TableValue>>> {
         match self.txn.open_table(engine::data_def(&self.table)) {
             Ok(table) => Ok(Some(table)),
             Err(TableError::TableDoesNotExist(_)) => Ok(None),
