@@ -63,8 +63,8 @@ jobs:
           direct_prompt: |
             Tu es expert en revue de code. Avant toute analyse, lis `CLAUDE.md` à la racine et
             applique strictement les conventions qu'il décrit (langue des commentaires, largeur de
-            ligne, gestion des erreurs `MhResult`, pas d'`unwrap` en production, noms de tests en
-            anglais, séparateurs de section dans les tests, etc.).
+            ligne, gestion des erreurs `SdbResult` / `SdbError`, pas d'`unwrap` en production, noms
+            de tests en anglais, séparateurs de section dans les tests, etc.).
 
             Effectue une revue de la PR #${{ github.event.issue.number }} :
 
@@ -94,7 +94,9 @@ jobs:
                PR ou de l'issue interdit explicitement ces ajouts.
             5. Analyse les changements selon ces axes : correction (logique, lifetimes, sûreté
                `unsafe`, gestion d'erreurs), conformité aux conventions du projet, performance,
-               sécurité, couverture de tests.
+               sécurité, couverture de tests. Pour inspecter le code au-delà du diff, utilise les
+               outils `Read`, `Grep` et `Glob` (ne lance pas `grep`, `cat` ou `python3` via Bash :
+               ils ne sont pas autorisés).
             6. Classe les points relevés par sévérité : **Critique** (bug/UB/sécurité), **Important**
                (régression probable, contrat ambigu, dette qui bloquera vite), **Mineur** (lisibilité,
                redondance, code mort).
@@ -104,7 +106,10 @@ jobs:
                - un récapitulatif des aspects positifs,
                - un tableau des points par sévérité (nouveaux et ouverts).
             8. Poste la revue via l'API GitHub en une seule requête qui inclut à la fois le résumé
-               global ET les commentaires inline sur les lignes précises du diff :
+               global ET les commentaires inline sur les lignes précises du diff. Crée d'abord le
+               fichier `review.json` à la racine du dépôt avec l'outil `Write` (n'écris jamais ce
+               fichier via une redirection Bash `cat >`/`tee` : seules les commandes `gh` sont
+               autorisées en Bash), puis poste-le :
 
                ```bash
                gh api repos/${{ github.repository }}/pulls/${{ github.event.issue.number }}/reviews \
@@ -142,7 +147,7 @@ jobs:
 
             **Ne tente PAS d'approuver la PR.** Cette commande est exclusivement informative,
             quel que soit le résultat de ton analyse.
-          allowed_tools: "Bash(gh pr diff:*),Bash(gh pr view:*),Bash(gh issue view:*),Bash(gh api:*)"
+          allowed_tools: "Read,Glob,Grep,Write,Bash(gh pr diff:*),Bash(gh pr view:*),Bash(gh issue view:*),Bash(gh api:*)"
 
   # =============================================================================================
   # Revue + approbation conditionnelle. L'approbation n'est posée qu'en l'absence de problème
@@ -185,8 +190,8 @@ jobs:
           direct_prompt: |
             Tu es expert en revue de code. Avant toute analyse, lis `CLAUDE.md` à la racine et
             applique strictement les conventions qu'il décrit (langue des commentaires, largeur de
-            ligne, gestion des erreurs `MhResult`, pas d'`unwrap` en production, noms de tests en
-            anglais, séparateurs de section dans les tests, etc.).
+            ligne, gestion des erreurs `SdbResult` / `SdbError`, pas d'`unwrap` en production, noms
+            de tests en anglais, séparateurs de section dans les tests, etc.).
 
             Effectue une revue de la PR #${{ github.event.issue.number }} :
 
@@ -216,7 +221,9 @@ jobs:
                PR ou de l'issue interdit explicitement ces ajouts.
             5. Analyse les changements selon ces axes : correction (logique, lifetimes, sûreté
                `unsafe`, gestion d'erreurs), conformité aux conventions du projet, performance,
-               sécurité, couverture de tests.
+               sécurité, couverture de tests. Pour inspecter le code au-delà du diff, utilise les
+               outils `Read`, `Grep` et `Glob` (ne lance pas `grep`, `cat` ou `python3` via Bash :
+               ils ne sont pas autorisés).
             6. Classe les points relevés par sévérité : **Critique** (bug/UB/sécurité), **Important**
                (régression probable, contrat ambigu, dette qui bloquera vite), **Mineur** (lisibilité,
                redondance, code mort).
@@ -231,7 +238,10 @@ jobs:
                - une section finale **Décision** indiquant explicitement « Approuvé » ou
                  « Modifications demandées » avec la justification.
             9. Poste la revue via l'API GitHub en une seule requête qui inclut à la fois le résumé
-               global ET les commentaires inline sur les lignes précises du diff :
+               global ET les commentaires inline sur les lignes précises du diff. Crée d'abord le
+               fichier `review.json` à la racine du dépôt avec l'outil `Write` (n'écris jamais ce
+               fichier via une redirection Bash `cat >`/`tee` : seules les commandes `gh` sont
+               autorisées en Bash), puis poste-le :
 
                ```bash
                gh api repos/${{ github.repository }}/pulls/${{ github.event.issue.number }}/reviews \
@@ -273,4 +283,4 @@ jobs:
 
             Ne contourne jamais les critères : un seul point Critique ou Important suffit à imposer
             `"REQUEST_CHANGES"` et interdit `"APPROVE"`.
-          allowed_tools: "Bash(gh pr diff:*),Bash(gh pr view:*),Bash(gh issue view:*),Bash(gh api:*)"
+          allowed_tools: "Read,Glob,Grep,Write,Bash(gh pr diff:*),Bash(gh pr view:*),Bash(gh issue view:*),Bash(gh api:*)"
