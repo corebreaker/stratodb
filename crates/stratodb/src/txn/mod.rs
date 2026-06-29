@@ -3,6 +3,7 @@
 mod query;
 mod read;
 mod rooted;
+mod value;
 mod write;
 
 pub use self::{

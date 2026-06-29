@@ -10,6 +10,7 @@ use crate::{
     access::{Reader, Writer},
     error::{SdbError, SdbResult},
     path::SPath,
+    Skey,
 };
 
 use chrono::{DateTime, NaiveDate, NaiveTime, TimeDelta, Utc};
@@ -75,6 +76,15 @@ scalar_value!(NaiveTime, Time, "time");
 scalar_value!(DateTime<Utc>, DateTime, "datetime");
 scalar_value!(TimeDelta, Duration, "duration");
 
+#[cfg(feature = "bigint-as-scalar")]
+scalar_value!(num_bigint::BigInt, BigInt, "bigint");
+
+#[cfg(feature = "bigfloat-as-scalar")]
+scalar_value!(num_bigfloat::BigFloat, BigFloat, "bigfloat");
+
+#[cfg(feature = "rational-as-scalar")]
+scalar_value!(num_rational::BigRational, Rational, "rational");
+
 // Platform-dependent integer widths are normalised to a fixed width so the
 // on-disk format is portable.
 impl SValue for usize {
@@ -103,6 +113,25 @@ impl SValue for isize {
             Scalar::I64(v) => Ok(*v as isize),
             other => Err(SdbError::TypeMismatch {
                 expected: "isize",
+                found:    other.type_str(),
+            }),
+        }
+    }
+}
+
+impl SValue for Skey {
+    fn to_scalar(&self) -> Scalar {
+        Scalar::Uuid((*self).into())
+    }
+
+    fn from_scalar(scalar: &Scalar) -> SdbResult<Self> {
+        match scalar {
+            Scalar::Uuid(uuid) => Ok(Skey::from_bytes(*uuid.as_bytes())),
+            Scalar::Null => Ok(Skey::ROOT),
+            Scalar::Bytes(v) => Skey::try_from_bytes(v),
+            Scalar::U128(v) => Ok(Skey::from(*v)),
+            other => Err(SdbError::TypeMismatch {
+                expected: "skey",
                 found:    other.type_str(),
             }),
         }
@@ -170,3 +199,12 @@ scalar_sdata!(NaiveDate);
 scalar_sdata!(NaiveTime);
 scalar_sdata!(DateTime<Utc>);
 scalar_sdata!(TimeDelta);
+
+#[cfg(all(feature = "bigint-as-scalar", feature = "bigint-as-data"))]
+scalar_sdata!(num_bigint::BigInt);
+
+#[cfg(all(feature = "bigfloat-as-scalar", feature = "bigfloat-as-data"))]
+scalar_sdata!(num_bigfloat::BigFloat);
+
+#[cfg(all(feature = "rational-as-scalar", feature = "rational-as-data"))]
+scalar_sdata!(num_rational::BigRational);

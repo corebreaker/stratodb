@@ -1,21 +1,39 @@
+use super::{repr::EnumRepr, variant_parts::VariantParts};
 use proc_macro2::TokenStream as TokenStream2;
 use quote::{format_ident, quote};
-use syn::{Fields, Ident, Variant};
+use syn::{Fields, Ident};
 
-/// A `match self` arm that writes one variant's payload under its tag.
-pub(super) fn store_arm(variant: &Variant) -> TokenStream2 {
-    let id = &variant.ident;
-    let tag = id.to_string();
+/// A `match self` arm that writes one variant's tag and payload per the
+/// representation. The tag goes to the object key (external) or a named field
+/// (adjacent); the payload lands under the representation's base path. Internal
+/// tagging flattens the payload into the tag's object, so it is handled apart.
+pub(super) fn store_arm(parts: &VariantParts, repr: &EnumRepr) -> TokenStream2 {
+    if let EnumRepr::Internal {
+        ..
+    } = repr
+    {
+        return internal_store_arm(parts, repr);
+    }
 
-    match &variant.fields {
-        Fields::Unit => quote! {
-            Self::#id => {
-                ::stratodb::access::Writer::put_scalar(writer, &at.child_name(#tag), ::stratodb::data::Scalar::Null)?;
+    let id = parts.ident();
+    let tag = parts.tag();
+    let tag_store = repr.tag_store(tag);
+    let base = repr.payload_base_store(tag);
+
+    match parts.fields() {
+        Fields::Unit => {
+            let unit_body = repr.unit_store(tag);
+
+            quote! {
+                Self::#id => {
+                    #unit_body
+                }
             }
-        },
+        }
         Fields::Unnamed(fields) if fields.unnamed.len() == 1 => quote! {
             Self::#id(inner) => {
-                ::stratodb::data::SData::store(inner, writer, &at.child_name(#tag))?;
+                #tag_store
+                ::stratodb::data::SData::store(inner, writer, &#base)?;
             }
         },
         Fields::Unnamed(fields) => {
@@ -28,7 +46,8 @@ pub(super) fn store_arm(variant: &Variant) -> TokenStream2 {
 
             quote! {
                 Self::#id( #(#binds),* ) => {
-                    let payload = at.child_name(#tag);
+                    #tag_store
+                    let payload = #base;
                     ::stratodb::access::Writer::ensure_container(writer, &payload, true)?;
                     #(#stores)*
                 }
@@ -40,9 +59,51 @@ pub(super) fn store_arm(variant: &Variant) -> TokenStream2 {
 
             quote! {
                 Self::#id { #(#names),* } => {
-                    let payload = at.child_name(#tag);
+                    #tag_store
+                    let payload = #base;
                     ::stratodb::access::Writer::ensure_container(writer, &payload, false)?;
                     #( ::stratodb::data::SData::store(#names, writer, &payload.child_name(#name_strs))?; )*
+                }
+            }
+        }
+    }
+}
+
+/// Internal tagging: the tag plus the payload flattened into a single object at
+/// `at`; tuple/newtype elements are keyed by their decimal index.
+fn internal_store_arm(parts: &VariantParts, repr: &EnumRepr) -> TokenStream2 {
+    let id = parts.ident();
+    let tag_store = repr.tag_store(parts.tag());
+
+    match parts.fields() {
+        Fields::Unit => quote! {
+            Self::#id => {
+                #tag_store
+            }
+        },
+        Fields::Unnamed(fields) => {
+            let binds: Vec<Ident> = (0..fields.unnamed.len()).map(|i| format_ident!("f{}", i)).collect();
+            let stores = binds.iter().enumerate().map(|(index, bind)| {
+                let key = index.to_string();
+
+                quote! { ::stratodb::data::SData::store(#bind, writer, &at.child_name(#key))?; }
+            });
+
+            quote! {
+                Self::#id( #(#binds),* ) => {
+                    #tag_store
+                    #(#stores)*
+                }
+            }
+        }
+        Fields::Named(fields) => {
+            let names: Vec<&Ident> = fields.named.iter().map(|f| f.ident.as_ref().unwrap()).collect();
+            let name_strs: Vec<String> = names.iter().map(|n| n.to_string()).collect();
+
+            quote! {
+                Self::#id { #(#names),* } => {
+                    #tag_store
+                    #( ::stratodb::data::SData::store(#names, writer, &at.child_name(#name_strs))?; )*
                 }
             }
         }

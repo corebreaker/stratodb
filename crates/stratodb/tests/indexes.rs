@@ -35,8 +35,7 @@ fn def(name: &str, unique: bool) -> IndexDef {
 
 #[test]
 fn create_index_registers_and_is_idempotent() {
-    let dir = tempfile::tempdir().unwrap();
-    let db = StratoDb::create(dir.path().join("idx.stratodb")).unwrap();
+    let db = StratoDb::create_in_memory().unwrap();
     let users = db.open_table("users").unwrap();
 
     users.create_index(&def("by_age_name", false)).unwrap();
@@ -48,8 +47,7 @@ fn create_index_registers_and_is_idempotent() {
 
 #[test]
 fn create_index_rejects_a_divergent_redefinition() {
-    let dir = tempfile::tempdir().unwrap();
-    let db = StratoDb::create(dir.path().join("idx_diverge.stratodb")).unwrap();
+    let db = StratoDb::create_in_memory().unwrap();
     let users = db.open_table("users").unwrap();
 
     users.create_index(&def("by_age_name", false)).unwrap();
@@ -64,8 +62,7 @@ fn create_index_rejects_a_divergent_redefinition() {
 
 #[test]
 fn indexes_are_scoped_per_table() {
-    let dir = tempfile::tempdir().unwrap();
-    let db = StratoDb::create(dir.path().join("idx_scope.stratodb")).unwrap();
+    let db = StratoDb::create_in_memory().unwrap();
     let users = db.open_table("users").unwrap();
     let posts = db.open_table("posts").unwrap();
 
@@ -113,8 +110,7 @@ fn count_at(db: &StratoDb, table: &str, index: &str, age: i32) -> usize {
 
 #[test]
 fn index_tracks_store_update_and_remove() {
-    let dir = tempfile::tempdir().unwrap();
-    let db = StratoDb::create(dir.path().join("e2e.stratodb")).unwrap();
+    let db = StratoDb::create_in_memory().unwrap();
     let users = db.open_table("users").unwrap();
     users.create_index(&single("by_age", "age", false)).unwrap();
 
@@ -152,8 +148,7 @@ fn index_tracks_store_update_and_remove() {
 
 #[test]
 fn find_rejects_unknown_index_and_wrong_arity() {
-    let dir = tempfile::tempdir().unwrap();
-    let db = StratoDb::create(dir.path().join("e2e_errors.stratodb")).unwrap();
+    let db = StratoDb::create_in_memory().unwrap();
     let users = db.open_table("users").unwrap();
     users.create_index(&single("by_age", "age", false)).unwrap();
 
@@ -171,8 +166,7 @@ fn find_rejects_unknown_index_and_wrong_arity() {
 
 #[test]
 fn storing_a_whole_subtree_indexes_every_child() {
-    let dir = tempfile::tempdir().unwrap();
-    let db = StratoDb::create(dir.path().join("e2e_subtree.stratodb")).unwrap();
+    let db = StratoDb::create_in_memory().unwrap();
     let users = db.open_table("users").unwrap();
     users.create_index(&single("by_age", "age", false)).unwrap();
 
@@ -200,8 +194,7 @@ fn storing_a_whole_subtree_indexes_every_child() {
 
 #[test]
 fn composite_index_supports_exact_and_prefix_match() {
-    let dir = tempfile::tempdir().unwrap();
-    let db = StratoDb::create(dir.path().join("e2e_composite.stratodb")).unwrap();
+    let db = StratoDb::create_in_memory().unwrap();
     let users = db.open_table("users").unwrap();
 
     // Two columns, the second descending, to exercise multi-column encoding.
@@ -219,8 +212,8 @@ fn composite_index_supports_exact_and_prefix_match() {
 
     let w = users.write().unwrap();
     for (name, a, b) in [("x", 1, 5), ("y", 1, 9), ("z", 2, 5)] {
-        w.put(&format!("users/{name}/a"), &a).unwrap();
-        w.put(&format!("users/{name}/b"), &b).unwrap();
+        w.put(format!("users/{name}/a"), &a).unwrap();
+        w.put(format!("users/{name}/b"), &b).unwrap();
     }
     w.commit().unwrap();
 
@@ -268,8 +261,7 @@ fn composite_index_supports_exact_and_prefix_match() {
 
 #[test]
 fn unique_index_keeps_the_entity_in_the_value() {
-    let dir = tempfile::tempdir().unwrap();
-    let db = StratoDb::create(dir.path().join("e2e_unique.stratodb")).unwrap();
+    let db = StratoDb::create_in_memory().unwrap();
     let users = db.open_table("users").unwrap();
     users.create_index(&single("uby_age", "age", true)).unwrap();
 
@@ -301,14 +293,13 @@ fn unique_index_keeps_the_entity_in_the_value() {
 
 #[test]
 fn query_builder_does_prefix_reverse_and_full_scans() {
-    let dir = tempfile::tempdir().unwrap();
-    let db = StratoDb::create(dir.path().join("e2e_query.stratodb")).unwrap();
+    let db = StratoDb::create_in_memory().unwrap();
     let users = db.open_table("users").unwrap();
     users.create_index(&single("by_age", "age", false)).unwrap();
 
     let w = users.write().unwrap();
     for (name, age) in [("alice", 30), ("bob", 20), ("carol", 30), ("dave", 40)] {
-        w.put(&format!("users/{name}/age"), &age).unwrap();
+        w.put(format!("users/{name}/age"), &age).unwrap();
     }
     w.commit().unwrap();
 
@@ -333,8 +324,7 @@ fn query_builder_does_prefix_reverse_and_full_scans() {
 
 #[test]
 fn unique_index_rejects_duplicates() {
-    let dir = tempfile::tempdir().unwrap();
-    let db = StratoDb::create(dir.path().join("e2e_unique_violation.stratodb")).unwrap();
+    let db = StratoDb::create_in_memory().unwrap();
     let users = db.open_table("users").unwrap();
     users.create_index(&single("uby_age", "age", true)).unwrap();
 
@@ -399,8 +389,7 @@ fn unique_index_rejects_duplicates() {
 
 #[test]
 fn create_index_backfills_existing_data() {
-    let dir = tempfile::tempdir().unwrap();
-    let db = StratoDb::create(dir.path().join("e2e_backfill.stratodb")).unwrap();
+    let db = StratoDb::create_in_memory().unwrap();
     let users = db.open_table("users").unwrap();
 
     // Populate the table *before* the index exists.
@@ -424,8 +413,7 @@ fn create_index_backfills_existing_data() {
 
 #[test]
 fn creating_a_unique_index_over_duplicates_is_rejected() {
-    let dir = tempfile::tempdir().unwrap();
-    let db = StratoDb::create(dir.path().join("e2e_backfill_unique.stratodb")).unwrap();
+    let db = StratoDb::create_in_memory().unwrap();
     let users = db.open_table("users").unwrap();
 
     // Two pre-existing rows share a value.

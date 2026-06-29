@@ -1,3 +1,5 @@
+use crate::attr::FieldAttrs;
+
 use proc_macro2::Ident;
 use syn::Type;
 
@@ -9,17 +11,20 @@ pub(crate) struct FieldParts<'a> {
     setter: Ident,
     /// The field's declared type.
     ty:     &'a Type,
-    /// The field name as a string literal (`"x"`), used as the path segment.
+    /// The stored node name (`rename`/`rename_all`, else the field name).
     name:   String,
+    /// The field's parsed `#[strato(...)]` attributes.
+    attrs:  FieldAttrs,
 }
 
 impl<'a> FieldParts<'a> {
-    pub(crate) fn new(getter: &'a Ident, setter: Ident, ty: &'a Type, name: String) -> Self {
+    pub(crate) fn new(getter: &'a Ident, setter: Ident, ty: &'a Type, name: String, attrs: FieldAttrs) -> Self {
         Self {
             getter,
             setter,
             ty,
             name,
+            attrs,
         }
     }
 
@@ -37,5 +42,9 @@ impl<'a> FieldParts<'a> {
 
     pub(crate) fn name(&self) -> &str {
         &self.name
+    }
+
+    pub(crate) fn attrs(&self) -> &FieldAttrs {
+        &self.attrs
     }
 }

@@ -1,4 +1,4 @@
-/// One component of an [`SPath`].
+/// One component of an [`SPath`](super::SPath).
 #[derive(Clone, PartialEq, Eq, Hash, Debug)]
 pub enum Segment {
     /// An object field name, e.g. `h` in `a/h`.

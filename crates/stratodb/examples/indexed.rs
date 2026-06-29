@@ -29,7 +29,7 @@ fn main() -> SdbResult<()> {
         ("carol", "Carol", "sales", "carol@example.io"),
     ] {
         w.store(
-            &format!("members/{id}"),
+            format!("members/{id}"),
             &Member {
                 name:  name.to_string(),
                 team:  team.to_string(),

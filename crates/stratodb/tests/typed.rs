@@ -227,8 +227,7 @@ impl<'t> SIdentifiable for StratoSampleMut<'t> {
 
 #[test]
 fn store_fetch_load_roundtrip() {
-    let dir = tempfile::tempdir().unwrap();
-    let db = StratoDb::create(dir.path().join("typed.stratodb")).unwrap();
+    let db = StratoDb::create_in_memory().unwrap();
     let table = db.open_table("data").unwrap();
 
     let sample = Sample {
@@ -261,8 +260,7 @@ fn store_fetch_load_roundtrip() {
 
 #[test]
 fn fetch_mut_exposes_pk() {
-    let dir = tempfile::tempdir().unwrap();
-    let db = StratoDb::create(dir.path().join("typed_mut.stratodb")).unwrap();
+    let db = StratoDb::create_in_memory().unwrap();
     let table = db.open_table("data").unwrap();
 
     let w = table.write().unwrap();
@@ -304,8 +302,7 @@ fn fetch_mut_exposes_pk() {
 /// generation never serves an older snapshot's cached child — nor the reverse.
 #[test]
 fn accessor_navigation_is_generation_coherent() {
-    let dir = tempfile::tempdir().unwrap();
-    let db = StratoDb::create(dir.path().join("typed_gen.stratodb")).unwrap();
+    let db = StratoDb::create_in_memory().unwrap();
     let table = db.open_table("data").unwrap();
 
     let w = table.write().unwrap();

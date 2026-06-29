@@ -14,6 +14,13 @@ mod smut;
 mod sref;
 mod value;
 
+#[cfg(any(
+    all(not(feature = "bigint-as-scalar"), feature = "bigint-as-data"),
+    all(not(feature = "bigfloat-as-scalar"), feature = "bigfloat-as-data"),
+    all(not(feature = "rational-as-scalar"), feature = "rational-as-data"),
+))]
+mod bignum;
+
 pub use self::{
     bytes::Bytes,
     definition::SData,

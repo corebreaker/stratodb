@@ -11,8 +11,16 @@
 //! decode column values back (a lookup returns the stored entity key).
 
 use crate::data::Scalar;
-
 use chrono::{Datelike, Timelike};
+
+#[cfg(any(feature = "bigint-as-scalar", feature = "rational-as-scalar"))]
+use num_bigint::{BigInt, Sign};
+
+#[cfg(feature = "bigfloat-as-scalar")]
+use num_bigfloat::BigFloat;
+
+#[cfg(feature = "rational-as-scalar")]
+use num_rational::BigRational;
 
 /// Type tags. Their relative order fixes the (arbitrary but deterministic)
 /// ordering between distinct scalar types; within a type the body decides.
@@ -39,6 +47,25 @@ mod tag {
     pub(super) const TIME: u8 = 18;
     pub(super) const DATETIME: u8 = 19;
     pub(super) const DURATION: u8 = 20;
+    #[cfg(feature = "bigint-as-scalar")]
+    pub(super) const BIG_INT: u8 = 21;
+    // The `BigFloat` classes each get their own tag, and unlike the exact storage tags these are laid out
+    // in ascending value order so the leading byte alone sorts the classes:
+    // −∞ < negatives < 0 < positives < +∞. NaN is unordered, so it is parked at the top of the block.
+    #[cfg(feature = "bigfloat-as-scalar")]
+    pub(super) const BIG_FLOAT_NEG_INF: u8 = 22;
+    #[cfg(feature = "bigfloat-as-scalar")]
+    pub(super) const BIG_FLOAT_NEG: u8 = 23;
+    #[cfg(feature = "bigfloat-as-scalar")]
+    pub(super) const BIG_FLOAT_ZERO: u8 = 24;
+    #[cfg(feature = "bigfloat-as-scalar")]
+    pub(super) const BIG_FLOAT_POS: u8 = 25;
+    #[cfg(feature = "bigfloat-as-scalar")]
+    pub(super) const BIG_FLOAT_POS_INF: u8 = 26;
+    #[cfg(feature = "bigfloat-as-scalar")]
+    pub(super) const BIG_FLOAT_NAN: u8 = 27;
+    #[cfg(feature = "rational-as-scalar")]
+    pub(super) const BIG_RATIONAL: u8 = 28;
 }
 
 /// Appends `scalar`'s order-preserving encoding to `out`. When `descending`, the
@@ -107,6 +134,15 @@ fn encode_ascending(out: &mut Vec<u8>, scalar: &Scalar) {
             let nanos = i128::from(v.num_seconds()) * 1_000_000_000 + i128::from(v.subsec_nanos());
             signed(out, tag::DURATION, &nanos.to_be_bytes());
         }
+        #[cfg(feature = "bigint-as-scalar")]
+        Scalar::BigInt(v) => {
+            out.push(tag::BIG_INT);
+            encode_signed_int(out, v);
+        }
+        #[cfg(feature = "bigfloat-as-scalar")]
+        Scalar::BigFloat(v) => encode_bigfloat(out, v),
+        #[cfg(feature = "rational-as-scalar")]
+        Scalar::Rational(v) => encode_rational(out, v),
     }
 }
 
@@ -161,6 +197,173 @@ fn ordered_bytes(out: &mut Vec<u8>, bytes: &[u8]) {
 
     out.push(0x00);
     out.push(0x01);
+}
+
+/// Appends an order-preserving, self-delimiting encoding of a non-negative
+/// integer given as its minimal big-endian magnitude `mag` (no leading zero
+/// bytes). The byte length is written first — itself length-prefixed, so the
+/// whole encoding stays self-delimiting — meaning a longer magnitude (a larger
+/// value) always sorts above a shorter one, and equal-length magnitudes then
+/// compare bytewise in value order. A bare big-endian concatenation would not:
+/// it sorts `[0x02]` ("2") above `[0x01, 0x00]` ("256").
+#[cfg(any(feature = "bigint-as-scalar", feature = "rational-as-scalar"))]
+fn put_uint_be(out: &mut Vec<u8>, mag: &[u8]) {
+    let len_be = (mag.len() as u64).to_be_bytes();
+    let start = len_be.iter().position(|&b| b != 0).unwrap_or(len_be.len());
+
+    out.push((len_be.len() - start) as u8);
+    out.extend_from_slice(&len_be[start..]);
+    out.extend_from_slice(mag);
+}
+
+/// Appends an order-preserving encoding of a signed big integer: a sign-class
+/// byte (negatives < zero < positives) then the magnitude via [`put_uint_be`].
+/// For negatives the magnitude bytes are bit-inverted, so a larger magnitude (a
+/// smaller value) sorts lower.
+#[cfg(any(feature = "bigint-as-scalar", feature = "rational-as-scalar"))]
+fn encode_signed_int(out: &mut Vec<u8>, v: &BigInt) {
+    const NEG: u8 = 0;
+    const ZERO: u8 = 1;
+    const POS: u8 = 2;
+
+    match v.sign() {
+        Sign::NoSign => out.push(ZERO),
+        Sign::Plus => {
+            out.push(POS);
+            put_uint_be(out, &v.magnitude().to_bytes_be());
+        }
+        Sign::Minus => {
+            out.push(NEG);
+
+            let start = out.len();
+            put_uint_be(out, &v.magnitude().to_bytes_be());
+            for b in &mut out[start..] {
+                *b = !*b;
+            }
+        }
+    }
+}
+
+/// Appends the value-ordered encoding of a `BigFloat`. The class tag orders the
+/// special values and the sign; a finite, non-zero number is keyed first by `d`,
+/// the base-10 exponent of its leading digit (so magnitude dominates), then by
+/// its significant digits. Negatives invert the body so a larger magnitude sorts
+/// lower.
+#[cfg(feature = "bigfloat-as-scalar")]
+fn encode_bigfloat(out: &mut Vec<u8>, v: &BigFloat) {
+    if v.is_nan() {
+        return out.push(tag::BIG_FLOAT_NAN);
+    }
+    if v.is_inf_pos() {
+        return out.push(tag::BIG_FLOAT_POS_INF);
+    }
+    if v.is_inf_neg() {
+        return out.push(tag::BIG_FLOAT_NEG_INF);
+    }
+    if v.is_zero() {
+        return out.push(tag::BIG_FLOAT_ZERO);
+    }
+
+    let n = v.get_mantissa_len();
+    let mut digits = vec![0u8; n];
+    v.get_mantissa_bytes(&mut digits);
+
+    // Trailing zeros do not change the value; dropping them makes the digit
+    // string canonical, so values that are equal encode identically.
+    while digits.len() > 1 && *digits.last().unwrap() == 0 {
+        digits.pop();
+    }
+
+    // value = (n significant digits) × 10^e with the point after the last digit,
+    // so the base-10 exponent of the leading digit is (n - 1) + e. It fits i16.
+    let d = (n as i32 - 1 + i32::from(v.get_exponent())) as i16;
+
+    let mut body = Vec::new();
+    push_signed(&mut body, &d.to_be_bytes());
+    ordered_bytes(&mut body, &digits);
+
+    if v.is_negative() {
+        out.push(tag::BIG_FLOAT_NEG);
+        for b in &body {
+            out.push(!b);
+        }
+    } else {
+        out.push(tag::BIG_FLOAT_POS);
+        out.extend_from_slice(&body);
+    }
+}
+
+/// Computes the canonical continued-fraction terms `[a0, a1, …]` of `numer/denom`
+/// (with `denom > 0`, as a `BigRational` guarantees). `a0` is the floor of the
+/// value; every later term is ≥ 1 and the last is ≥ 2, so the expansion — and the
+/// encoding built from it — is unique per value.
+#[cfg(feature = "rational-as-scalar")]
+fn continued_fraction(numer: &BigInt, denom: &BigInt) -> Vec<BigInt> {
+    let mut terms = Vec::new();
+    let mut p = numer.clone();
+    let mut q = denom.clone();
+
+    loop {
+        // Floor division: `BigInt`'s `/` truncates toward zero, and `q` is always
+        // positive, so only a negative remainder needs the downward correction.
+        let trunc = &p / &q;
+        let rem = &p - &(&trunc * &q);
+        let (a, r) = if rem.sign() == Sign::Minus {
+            (trunc - BigInt::from(1), rem + &q)
+        } else {
+            (trunc, rem)
+        };
+
+        terms.push(a);
+        if r.sign() == Sign::NoSign {
+            break;
+        }
+
+        p = q;
+        q = r;
+    }
+
+    terms
+}
+
+/// Appends the value-ordered encoding of a rational via its continued fraction.
+/// A continued fraction increases in its even-indexed terms and decreases in its
+/// odd-indexed ones, so odd-index terms are bit-inverted. A per-position marker
+/// separates "another term follows" from "the expansion stops here"; the stop
+/// marker's value is chosen by parity so termination sorts on the correct side of
+/// a continuation at that position.
+#[cfg(feature = "rational-as-scalar")]
+fn encode_rational(out: &mut Vec<u8>, v: &BigRational) {
+    const CONTINUE: u8 = 1;
+    const STOP_ODD: u8 = 0;
+    const STOP_EVEN: u8 = 2;
+
+    out.push(tag::BIG_RATIONAL);
+
+    let terms = continued_fraction(v.numer(), v.denom());
+    encode_signed_int(out, &terms[0]);
+
+    for (i, term) in terms.iter().enumerate().skip(1) {
+        out.push(CONTINUE);
+
+        let start = out.len();
+        put_uint_be(out, &term.magnitude().to_bytes_be());
+        if i % 2 == 1 {
+            for b in &mut out[start..] {
+                *b = !*b;
+            }
+        }
+    }
+
+    // The stop sits at the position just past the last term; its parity decides
+    // whether "stop" must sort below (odd) or above (even) a continuation.
+    let stop = if terms.len().is_multiple_of(2) {
+        STOP_EVEN
+    } else {
+        STOP_ODD
+    };
+
+    out.push(stop);
 }
 
 #[cfg(test)]
@@ -337,5 +540,82 @@ mod tests {
         assert!(composite("a", 100) < composite("ab", 1));
         assert!(composite("a", 1) < composite("a", 2));
         assert!(composite("a", 2) < composite("b", 1));
+    }
+
+    #[cfg(feature = "bigint-as-scalar")]
+    #[test]
+    fn bigints_order() {
+        // The 127/128 and 255/256 pairs cross a byte-length boundary — exactly
+        // where a fixed-width sign flip (the previous encoding) inverted the order.
+        let huge = BigInt::parse_bytes(b"123456789012345678901234567890", 10).unwrap();
+
+        assert_ordered(&[
+            Scalar::BigInt(-huge.clone()),
+            Scalar::BigInt(BigInt::from(-257)),
+            Scalar::BigInt(BigInt::from(-256)),
+            Scalar::BigInt(BigInt::from(-129)),
+            Scalar::BigInt(BigInt::from(-128)),
+            Scalar::BigInt(BigInt::from(-1)),
+            Scalar::BigInt(BigInt::from(0)),
+            Scalar::BigInt(BigInt::from(1)),
+            Scalar::BigInt(BigInt::from(127)),
+            Scalar::BigInt(BigInt::from(128)),
+            Scalar::BigInt(BigInt::from(255)),
+            Scalar::BigInt(BigInt::from(256)),
+            Scalar::BigInt(huge),
+        ]);
+    }
+
+    #[cfg(feature = "bigfloat-as-scalar")]
+    #[test]
+    fn bigfloats_order() {
+        use num_bigfloat::{INF_NEG, INF_POS};
+
+        let bf = |s: &str| BigFloat::parse(s).unwrap();
+
+        assert_ordered(&[
+            Scalar::BigFloat(INF_NEG),
+            Scalar::BigFloat(bf("-1000")),
+            Scalar::BigFloat(bf("-100.5")),
+            Scalar::BigFloat(bf("-1")),
+            Scalar::BigFloat(bf("-0.01")),
+            Scalar::BigFloat(bf("-0.001")),
+            Scalar::BigFloat(bf("0")),
+            Scalar::BigFloat(bf("0.001")),
+            Scalar::BigFloat(bf("0.01")),
+            Scalar::BigFloat(bf("0.1")),
+            Scalar::BigFloat(bf("1")),
+            Scalar::BigFloat(bf("1.5")),
+            Scalar::BigFloat(bf("2")),
+            Scalar::BigFloat(bf("10")),
+            Scalar::BigFloat(bf("100.5")),
+            Scalar::BigFloat(bf("1000")),
+            Scalar::BigFloat(INF_POS),
+        ]);
+    }
+
+    #[cfg(feature = "rational-as-scalar")]
+    #[test]
+    fn rationals_order() {
+        let r = |n: i64, d: i64| Scalar::Rational(BigRational::new(BigInt::from(n), BigInt::from(d)));
+
+        // Spans negatives, the dense (0, 1) interval where continued fractions
+        // earn their keep (1/100 < 1/3 < 1/2 < 2/3), and integers.
+        assert_ordered(&[
+            r(-2, 1),
+            r(-3, 2),
+            r(-1, 1),
+            r(-1, 2),
+            r(-1, 3),
+            r(0, 1),
+            r(1, 100),
+            r(1, 3),
+            r(1, 2),
+            r(2, 3),
+            r(1, 1),
+            r(3, 2),
+            r(2, 1),
+            r(100, 1),
+        ]);
     }
 }

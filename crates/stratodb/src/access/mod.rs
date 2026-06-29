@@ -2,7 +2,8 @@
 //!
 //! A cursor is an opaque, copyable handle bound to a transaction; an accessor
 //! pairs a cursor with the path and primary key of the node it points at. Read
-//! accessors implement [`SRef`], write accessors [`SMut`]; both expose the
+//! accessors implement [`SRef`](crate::data::refs::SRef), write accessors
+//! [`SMut`](crate::data::refs::SMut); both expose the
 //! node's primary key via `key()` (resolved eagerly when the accessor is built).
 
 mod reader;

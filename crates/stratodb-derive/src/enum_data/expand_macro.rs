@@ -1,33 +1,120 @@
-use super::{accessors::accessors, load_arm::load_arm, store_arm::store_arm};
-use crate::desc::enum_desc;
+use super::{accessors::accessors, load_arm::load_arm, store_arm::store_arm, variant_parts::VariantParts};
+use crate::{attr::ContainerAttrs, desc::enum_desc, generics::Generics};
 use proc_macro2::TokenStream as TokenStream2;
 use quote::{format_ident, quote};
-use syn::{DataEnum, DeriveInput, Result as SynResult};
+use syn::{DataEnum, DeriveInput, Error, Result as SynResult};
 
-pub(crate) fn expand_enum(input: &DeriveInput, data: &DataEnum) -> SynResult<TokenStream2> {
+pub(crate) fn expand_enum(
+    input: &DeriveInput,
+    data: &DataEnum,
+    container: &ContainerAttrs,
+    generics: &Generics,
+) -> SynResult<TokenStream2> {
     let vis = &input.vis;
     let name = &input.ident;
     let ref_name = format_ident!("Strato{}", name);
     let mut_name = format_ident!("Strato{}Mut", name);
     let desc_name = format_ident!("Strato{}Desc", name);
 
-    let store_arms = data.variants.iter().map(store_arm);
-    let load_arms = data.variants.iter().map(load_arm);
-    let variant_names: Vec<String> = data.variants.iter().map(|v| v.ident.to_string()).collect();
+    let repr = super::repr::EnumRepr::from_container(container, name)?;
+
+    let parts = data
+        .variants
+        .iter()
+        .map(|variant| VariantParts::new(variant, container.rename_all()))
+        .collect::<SynResult<Vec<_>>>()?;
+
+    // The catch-all `#[strato(other)]` variant: at most one, unit, never untagged.
+    let other_variant = {
+        let mut others = parts.iter().filter(|part| part.is_other());
+        match (others.next(), others.next()) {
+            (None, _) => None,
+            (Some(_), Some(second)) => {
+                return Err(Error::new(
+                    second.ident().span(),
+                    "at most one variant may be `#[strato(other)]`",
+                ));
+            }
+            (Some(first), None) => {
+                if repr.is_untagged() {
+                    return Err(Error::new(
+                        first.ident().span(),
+                        "`#[strato(other)]` is not supported on untagged enums",
+                    ));
+                }
+                if !first.is_unit() {
+                    return Err(Error::new(
+                        first.ident().span(),
+                        "an `#[strato(other)]` variant must be a unit variant",
+                    ));
+                }
+
+                Some(first)
+            }
+        }
+    };
+
+    let store_arms = parts.iter().map(|part| store_arm(part, &repr));
+    let variant_names: Vec<String> = parts.iter().map(|part| part.tag().to_string()).collect();
+
+    // Untagged has no tag to match on — each variant is tried in declaration order.
+    let load_body = if repr.is_untagged() {
+        let attempts = parts.iter().map(super::load_arm::untagged_arm);
+        let error = container.no_match_error(quote! { ::std::format!("no untagged variant matched at '{at}'") });
+
+        quote! {
+            #(#attempts)*
+
+            ::core::result::Result::Err(#error)
+        }
+    } else {
+        let tag_load = repr.tag_load();
+        // The `other` variant is the match's catch-all, so it gets no arm of its own.
+        let load_arms = parts
+            .iter()
+            .filter(|part| !part.is_other())
+            .map(|part| load_arm(part, &repr));
+
+        let catch_all = match other_variant {
+            Some(part) => {
+                let id = part.ident();
+
+                quote! { _ => ::core::result::Result::Ok(Self::#id), }
+            }
+            None => {
+                let error = container.no_match_error(quote! { ::std::format!("unknown enum variant tag: {tag}") });
+
+                quote! { _ => ::core::result::Result::Err(#error), }
+            }
+        };
+
+        quote! {
+            #tag_load
+
+            match tag.as_str() {
+                #(#load_arms)*
+                #catch_all
+            }
+        }
+    };
+
+    let impl_generics = generics.sdata_impl();
+    let ty_generics = generics.sdata_ty();
+    let where_clause = generics.sdata_where();
+    let accessor_ty = generics.accessor_ty();
 
     let sdata_impl = quote! {
         #[automatically_derived]
-        impl ::stratodb::data::SData for #name {
-            type Ref<'t> = #ref_name<'t>;
-            type Mut<'t> = #mut_name<'t>;
+        impl #impl_generics ::stratodb::data::SData for #name #ty_generics #where_clause {
+            type Ref<'t> = #ref_name #accessor_ty;
+            type Mut<'t> = #mut_name #accessor_ty;
 
-            fn store<W: ::stratodb::access::Writer>(
+            fn store<__W: ::stratodb::access::Writer>(
                 &self,
-                writer: &W,
+                writer: &__W,
                 at: &::stratodb::path::SPath,
             ) -> ::stratodb::SdbResult<()> {
-                // Externally tagged: the node carries exactly one key (the active
-                // variant), so clear any previously-stored variant first.
+                // The node carries exactly one variant, so clear any prior one first.
                 ::stratodb::access::Writer::remove(writer, at)?;
 
                 match self {
@@ -37,31 +124,16 @@ pub(crate) fn expand_enum(input: &DeriveInput, data: &DataEnum) -> SynResult<Tok
                 ::core::result::Result::Ok(())
             }
 
-            fn load<R: ::stratodb::access::Reader>(
-                reader: &R,
+            fn load<__R: ::stratodb::access::Reader>(
+                reader: &__R,
                 at: &::stratodb::path::SPath,
             ) -> ::stratodb::SdbResult<Self> {
-                let key = ::stratodb::access::Reader::resolve(reader, at)?
-                    .ok_or_else(|| ::stratodb::SdbError::PathNotFound(at.clone()))?;
-
-                let tag = ::stratodb::access::Reader::object_keys(reader, key)?
-                    .into_iter()
-                    .next()
-                    .ok_or_else(|| {
-                        ::stratodb::SdbError::Corrupt(::std::string::String::from("enum node has no variant tag"))
-                    })?;
-
-                match tag.as_str() {
-                    #(#load_arms)*
-                    other => ::core::result::Result::Err(::stratodb::SdbError::Corrupt(::std::format!(
-                        "unknown enum variant tag: {other}"
-                    ))),
-                }
+                #load_body
             }
         }
     };
 
-    let accessors = accessors(vis, &ref_name, &mut_name);
+    let accessors = accessors(vis, &ref_name, &mut_name, &repr, generics);
     let desc = enum_desc(vis, &desc_name, &name.to_string(), &variant_names);
 
     Ok(quote! {

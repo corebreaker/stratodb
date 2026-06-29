@@ -19,8 +19,8 @@ use crate::{
     path::SPath,
 };
 
-/// A pending index query (see the [module docs](self)). Build it up, then
-/// [`run`](IndexQuery::run).
+/// A pending index query: an exact or prefix match against an index, optionally
+/// reversed or subtree-scoped. Build it up, then [`run`](IndexQuery::run).
 pub struct IndexQuery<'t> {
     txn:     &'t ReadTxn,
     index:   String,

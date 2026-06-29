@@ -53,7 +53,7 @@ impl TableKey {
         match self {
             TableKey::Data(skey) => {
                 buf.push(tag::DATA);
-                buf.extend_from_slice(&skey.to_bytes());
+                buf.extend_from_slice(&skey.into_bytes());
             }
             TableKey::Index {
                 id,
@@ -63,7 +63,7 @@ impl TableKey {
                 buf.push(tag::INDEX_DUP);
                 codec::put_u32(&mut buf, id.0);
                 buf.extend_from_slice(cols);
-                buf.extend_from_slice(&entity.to_bytes());
+                buf.extend_from_slice(&entity.into_bytes());
             }
             TableKey::Index {
                 id,

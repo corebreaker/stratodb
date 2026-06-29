@@ -9,6 +9,9 @@ description = "A typed, transactional, indexed document store layered over an em
 [dependencies]
 chrono = "0.4"
 lru = "0.18"
+num-bigint = { version = "0.4", optional = true }
+num-bigfloat = { version = "1.7", optional = true }
+num-rational = { version = "0.4", optional = true }
 redb = "4.1"
 thiserror = "2.0"
 uuid = { version = "1.23", features = ["v7"] }
@@ -21,6 +24,15 @@ tempfile = "3.27"
 [features]
 default = []
 derive = ["dep:stratodb-derive"]
+bignum = ["bignum-as-scalar", "bignum-as-data"]
+bignum-as-scalar = ["bigint-as-scalar", "bigfloat-as-scalar", "rational-as-scalar"]
+bigint-as-scalar = ["dep:num-bigint"]
+bigfloat-as-scalar = ["dep:num-bigfloat"]
+rational-as-scalar = ["dep:num-rational", "dep:num-bigint"]
+bignum-as-data = ["bigint-as-data", "bigfloat-as-data", "rational-as-data"]
+bigint-as-data = ["dep:num-bigint"]
+bigfloat-as-data = ["dep:num-bigfloat"]
+rational-as-data = ["dep:num-rational", "dep:num-bigint"]
 
 [[example]]
 name = "indexed"

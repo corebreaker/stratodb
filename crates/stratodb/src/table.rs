@@ -17,7 +17,7 @@ use std::sync::{atomic::Ordering, Arc};
 ///
 /// Cloning is cheap. Reads run concurrently; writes are serialized (a single
 /// writer at a time), matching the underlying engine's transaction model. The
-/// handle carries a shared [`PathCache`] so a transaction's accessors reuse
+/// handle carries a shared `PathCache` so a transaction's accessors reuse
 /// resolved paths.
 #[derive(Clone)]
 pub struct Table {
@@ -47,12 +47,12 @@ impl Table {
         // to commits, so cached resolutions are never attributed to the wrong one.
         let guard = self
             .inner
-            .version_lock
+            .version_lock()
             .read()
             .map_err(|err| SdbError::CannotAccess(format!("version lock poisoned: {err}")))?;
 
-        let txn = self.inner.db.begin_read()?;
-        let generation = self.inner.generation.load(Ordering::Acquire);
+        let txn = self.inner.db().begin_read()?;
+        let generation = self.inner.generation().load(Ordering::Acquire);
         drop(guard);
 
         Ok(ReadTxn::new(
@@ -66,7 +66,7 @@ impl Table {
     /// Begins a write transaction. Only one write transaction may be active at a
     /// time across the whole database.
     pub fn write(&self) -> SdbResult<WriteTxn> {
-        let txn = self.inner.db.begin_write()?;
+        let txn = self.inner.db().begin_write()?;
 
         Ok(WriteTxn::new(txn, self.name.clone(), Arc::clone(&self.inner)))
     }
@@ -80,7 +80,7 @@ impl Table {
     /// written before or after — and creating a unique index over duplicate data
     /// fails with [`UniqueViolation`](crate::SdbError::UniqueViolation).
     pub fn create_index(&self, def: &IndexDef) -> SdbResult<()> {
-        let txn = self.inner.db.begin_write()?;
+        let txn = self.inner.db().begin_write()?;
 
         // Register; on a fresh creation, recover the entry (it carries the new id)
         // so the back-fill below can build its keys.
@@ -105,7 +105,7 @@ impl Table {
     }
 
     /// Registers every index that `T` declares (via `#[strato(index(...))]`),
-    /// scoping each to `pattern`. A shorthand for calling [`create_index`] for each
+    /// scoping each to `pattern`. A shorthand for calling [`create_index`](Self::create_index) for each
     /// of [`T::index_defs`](SIndexed::index_defs); each is idempotent and
     /// back-filled.
     pub fn create_indexes<T: SIndexed>(&self, pattern: &str) -> SdbResult<()> {
@@ -118,7 +118,7 @@ impl Table {
 
     /// Returns the definition of the named index on this table, if it exists.
     pub fn index_def(&self, name: &str) -> SdbResult<Option<IndexDef>> {
-        let txn = self.inner.db.begin_read()?;
+        let txn = self.inner.db().begin_read()?;
         let meta = txn.open_table(META_TABLE)?;
 
         Ok(registry::lookup(&meta, &self.name, name)?.map(|entry| entry.into_def()))

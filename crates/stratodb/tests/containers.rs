@@ -10,16 +10,15 @@ use stratodb::{
 
 use std::collections::BTreeMap;
 
-fn table() -> (tempfile::TempDir, Table) {
-    let dir = tempfile::tempdir().expect("tempdir");
-    let db = StratoDb::create(dir.path().join("containers.stratodb")).expect("create db");
-    let table = db.open_table("data").expect("open table");
-    (dir, table)
+fn table() -> Table {
+    let db = StratoDb::create_in_memory().expect("create db");
+
+    db.open_table("data").expect("open table")
 }
 
 #[test]
 fn vec_roundtrips_and_is_accessible() {
-    let (_dir, table) = table();
+    let table = table();
 
     let w = table.write().unwrap();
     w.store("nums", &vec![10i32, 20, 30]).unwrap();
@@ -38,7 +37,7 @@ fn vec_roundtrips_and_is_accessible() {
 
 #[test]
 fn empty_vec_still_materializes_a_list_node() {
-    let (_dir, table) = table();
+    let table = table();
 
     let w = table.write().unwrap();
     w.store("empty", &Vec::<i32>::new()).unwrap();
@@ -55,7 +54,7 @@ fn empty_vec_still_materializes_a_list_node() {
 
 #[test]
 fn option_some_and_none() {
-    let (_dir, table) = table();
+    let table = table();
 
     let w = table.write().unwrap();
     w.store("some", &Some(7i32)).unwrap();
@@ -77,7 +76,7 @@ fn option_some_and_none() {
 
 #[test]
 fn bytes_is_a_single_packed_leaf() {
-    let (_dir, table) = table();
+    let table = table();
 
     let w = table.write().unwrap();
     w.store("blob", &Bytes(vec![1, 2, 3, 255])).unwrap();
@@ -91,7 +90,7 @@ fn bytes_is_a_single_packed_leaf() {
 
 #[test]
 fn seq_mut_push_appends() {
-    let (_dir, table) = table();
+    let table = table();
 
     let w = table.write().unwrap();
     w.store("xs", &vec![1i32]).unwrap();
@@ -108,7 +107,7 @@ fn seq_mut_push_appends() {
 
 #[test]
 fn seq_mut_insert_and_remove() {
-    let (_dir, table) = table();
+    let table = table();
 
     let w = table.write().unwrap();
     w.store("xs", &vec![1i32, 2, 3, 4, 5]).unwrap();
@@ -127,7 +126,7 @@ fn seq_mut_insert_and_remove() {
 
 #[test]
 fn path_cache_stays_coherent_across_writes() {
-    let (_dir, table) = table();
+    let table = table();
 
     let w = table.write().unwrap();
     w.put("a/x", &1u32).unwrap();
@@ -152,7 +151,7 @@ fn path_cache_stays_coherent_across_writes() {
 
 #[test]
 fn map_roundtrips_and_is_accessible() {
-    let (_dir, table) = table();
+    let table = table();
 
     let mut ages = BTreeMap::new();
     ages.insert(String::from("alice"), 30i32);
@@ -179,7 +178,7 @@ fn map_roundtrips_and_is_accessible() {
 
 #[test]
 fn empty_map_materializes_an_object_node() {
-    let (_dir, table) = table();
+    let table = table();
 
     let w = table.write().unwrap();
     w.store("empty", &BTreeMap::<String, i32>::new()).unwrap();
@@ -196,7 +195,7 @@ fn empty_map_materializes_an_object_node() {
 
 #[test]
 fn map_mut_insert_and_remove() {
-    let (_dir, table) = table();
+    let table = table();
 
     let w = table.write().unwrap();
     let mut initial = BTreeMap::new();
@@ -220,7 +219,7 @@ fn map_mut_insert_and_remove() {
 
 #[test]
 fn seq_iteration_and_queries() {
-    let (_dir, table) = table();
+    let table = table();
 
     let w = table.write().unwrap();
     w.store("xs", &vec![10i32, 20, 30]).unwrap();
@@ -249,7 +248,7 @@ fn seq_iteration_and_queries() {
 
 #[test]
 fn seq_mut_reordering_and_bulk_ops() {
-    let (_dir, table) = table();
+    let table = table();
 
     let w = table.write().unwrap();
     w.store("xs", &vec![1i32, 2, 3, 4, 5]).unwrap();
@@ -274,7 +273,7 @@ fn seq_mut_reordering_and_bulk_ops() {
 
 #[test]
 fn seq_clear_empties_the_list() {
-    let (_dir, table) = table();
+    let table = table();
 
     let w = table.write().unwrap();
     w.store("xs", &vec![1i32, 2, 3]).unwrap();
@@ -300,7 +299,7 @@ fn sample_map() -> BTreeMap<String, i32> {
 
 #[test]
 fn map_iteration_and_queries() {
-    let (_dir, table) = table();
+    let table = table();
 
     let w = table.write().unwrap();
     w.store("m", &sample_map()).unwrap();
@@ -337,7 +336,7 @@ fn map_iteration_and_queries() {
 
 #[test]
 fn map_mut_bulk_ops() {
-    let (_dir, table) = table();
+    let table = table();
 
     let w = table.write().unwrap();
     let mut initial = sample_map();
@@ -367,7 +366,7 @@ fn map_mut_bulk_ops() {
 
 #[test]
 fn map_drain_and_clear() {
-    let (_dir, table) = table();
+    let table = table();
 
     let w = table.write().unwrap();
     w.store("m", &sample_map()).unwrap();

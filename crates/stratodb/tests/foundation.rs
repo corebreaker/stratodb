@@ -2,17 +2,14 @@
 //! transactions, cascade deletes and persistence.
 
 use stratodb::{error::SdbError, data::Scalar, NodeKind, StratoDb};
-use tempfile::TempDir;
 
-fn temp_db() -> (TempDir, StratoDb) {
-    let dir = tempfile::tempdir().expect("tempdir");
-    let db = StratoDb::create(dir.path().join("test.stratodb")).expect("create db");
-    (dir, db)
+fn mem_db() -> StratoDb {
+    StratoDb::create_in_memory().expect("create db")
 }
 
 #[test]
 fn put_and_get_across_objects_and_lists() {
-    let (_dir, db) = temp_db();
+    let db = mem_db();
     let table = db.open_table("data").unwrap();
 
     let w = table.write().unwrap();
@@ -39,7 +36,7 @@ fn put_and_get_across_objects_and_lists() {
 
 #[test]
 fn replace_semantics_overwrite_subtree() {
-    let (_dir, db) = temp_db();
+    let db = mem_db();
     let table = db.open_table("data").unwrap();
 
     let w = table.write().unwrap();
@@ -61,7 +58,7 @@ fn replace_semantics_overwrite_subtree() {
 
 #[test]
 fn remove_cascades() {
-    let (_dir, db) = temp_db();
+    let db = mem_db();
     let table = db.open_table("data").unwrap();
 
     let w = table.write().unwrap();
@@ -79,7 +76,7 @@ fn remove_cascades() {
 
 #[test]
 fn list_element_removal_reindexes_following_elements() {
-    let (_dir, db) = temp_db();
+    let db = mem_db();
     let table = db.open_table("data").unwrap();
 
     let w = table.write().unwrap();
@@ -101,7 +98,7 @@ fn list_element_removal_reindexes_following_elements() {
 
 #[test]
 fn type_mismatch_is_reported() {
-    let (_dir, db) = temp_db();
+    let db = mem_db();
     let table = db.open_table("data").unwrap();
 
     let w = table.write().unwrap();
@@ -115,7 +112,7 @@ fn type_mismatch_is_reported() {
 
 #[test]
 fn reading_a_container_as_a_scalar_errors() {
-    let (_dir, db) = temp_db();
+    let db = mem_db();
     let table = db.open_table("data").unwrap();
 
     let w = table.write().unwrap();
@@ -129,7 +126,7 @@ fn reading_a_container_as_a_scalar_errors() {
 
 #[test]
 fn scalar_variety_roundtrips_through_storage() {
-    let (_dir, db) = temp_db();
+    let db = mem_db();
     let table = db.open_table("data").unwrap();
 
     let values = [
@@ -142,13 +139,13 @@ fn scalar_variety_roundtrips_through_storage() {
 
     let w = table.write().unwrap();
     for (path, scalar) in &values {
-        w.put_scalar(path, scalar.clone()).unwrap();
+        w.put_scalar(*path, scalar.clone()).unwrap();
     }
     w.commit().unwrap();
 
     let r = table.read().unwrap();
     for (path, scalar) in &values {
-        assert_eq!(r.get_scalar(path).unwrap().as_ref(), Some(scalar));
+        assert_eq!(r.get_scalar(*path).unwrap().as_ref(), Some(scalar));
     }
 }
 
@@ -173,7 +170,7 @@ fn data_persists_across_reopen() {
 
 #[test]
 fn tables_are_isolated() {
-    let (_dir, db) = temp_db();
+    let db = mem_db();
     let users = db.open_table("users").unwrap();
     let orders = db.open_table("orders").unwrap();
 
@@ -188,7 +185,35 @@ fn tables_are_isolated() {
 
 #[test]
 fn reserved_and_empty_table_names_are_rejected() {
-    let (_dir, db) = temp_db();
+    let db = mem_db();
     assert!(db.open_table("$metadata").is_err());
     assert!(db.open_table("").is_err());
+}
+
+#[test]
+fn in_memory_db_roundtrips_committed_data() {
+    let db = StratoDb::create_in_memory().unwrap();
+    let table = db.open_table("data").unwrap();
+
+    let w = table.write().unwrap();
+    w.put("a/b/c", &42u32).unwrap();
+    w.commit().unwrap();
+
+    // survives the commit and is readable from a fresh read transaction
+    let r = table.read().unwrap();
+    assert_eq!(r.get::<u32>("a/b/c").unwrap(), Some(42));
+}
+
+#[test]
+fn in_memory_dbs_are_independent() {
+    let one = StratoDb::create_in_memory().unwrap();
+    let two = StratoDb::create_in_memory().unwrap();
+
+    let w = one.open_table("data").unwrap().write().unwrap();
+    w.put("k", &1u32).unwrap();
+    w.commit().unwrap();
+
+    // a second in-memory database has its own storage and sees nothing
+    let r = two.open_table("data").unwrap().read().unwrap();
+    assert_eq!(r.kind("k").unwrap(), None);
 }

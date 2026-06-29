@@ -22,8 +22,7 @@ struct User {
 
 #[test]
 fn find_returns_typed_entities() {
-    let dir = tempfile::tempdir().unwrap();
-    let db = StratoDb::create(dir.path().join("idx_typed.stratodb")).unwrap();
+    let db = StratoDb::create_in_memory().unwrap();
     let users = db.open_table("users").unwrap();
 
     users
@@ -76,8 +75,7 @@ struct Person {
 
 #[test]
 fn derived_index_attributes_declare_and_create() {
-    let dir = tempfile::tempdir().unwrap();
-    let db = StratoDb::create(dir.path().join("idx_derived.stratodb")).unwrap();
+    let db = StratoDb::create_in_memory().unwrap();
     let people = db.open_table("people").unwrap();
 
     // One call registers every index the type declares, scoped to the pattern.
@@ -244,4 +242,45 @@ fn employees_indexes_end_to_end() {
         .find("by_dept", &[Scalar::Str(String::from("eng"))])
         .unwrap();
     assert_eq!(eng.len(), 3);
+}
+
+#[derive(SData, Debug, PartialEq)]
+#[strato(rename_all = "camelCase")]
+#[strato(index(name = "by_full", columns(full_name)))]
+struct Account {
+    full_name: String,
+}
+
+#[test]
+fn renamed_field_indexes_under_its_stored_name() {
+    let db = StratoDb::create_in_memory().unwrap();
+    let accounts = db.open_table("accounts").unwrap();
+    accounts.create_indexes::<Account>("accounts/*").unwrap();
+
+    let w = accounts.write().unwrap();
+    w.store(
+        "accounts/a",
+        &Account {
+            full_name: String::from("Ada"),
+        },
+    )
+    .unwrap();
+    w.commit().unwrap();
+
+    let r = accounts.read().unwrap();
+
+    // The field is stored under its renamed node...
+    assert_eq!(
+        r.get::<String>("accounts/a/fullName").unwrap(),
+        Some(String::from("Ada"))
+    );
+
+    // ...and the index column path uses that stored name, so the lookup matches.
+    let found: Vec<Account> = r.find("by_full", &[Scalar::Str(String::from("Ada"))]).unwrap();
+    assert_eq!(
+        found,
+        vec![Account {
+            full_name: String::from("Ada"),
+        }]
+    );
 }
