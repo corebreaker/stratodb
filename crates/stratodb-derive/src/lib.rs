@@ -17,8 +17,7 @@
 //! enums; tuple/unit structs and generics are reported as errors.
 //!
 //! A struct may also declare secondary indexes with `#[strato(index(...))]`,
-//! generating an [`SIndexed`](../stratodb/index/trait.SIndexed.html) impl (see
-//! [`index_attr`]).
+//! generating an [`SIndexed`](../stratodb/index/trait.SIndexed.html) impl.
 
 mod attr;
 mod convert;
@@ -35,7 +34,7 @@ mod sdata_impl;
 /// Derives [`SData`] for a struct with named fields or an enum.
 ///
 /// Structs may carry `#[strato(index(...))]` attributes to declare secondary
-/// indexes (see [`index_attr`]).
+/// indexes.
 #[proc_macro_derive(SData, attributes(strato))]
 pub fn derive_sdata(input: proc_macro::TokenStream) -> proc_macro::TokenStream {
     let input = syn::parse_macro_input!(input as syn::DeriveInput);

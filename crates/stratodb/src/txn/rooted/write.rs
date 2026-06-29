@@ -6,7 +6,7 @@ use crate::{
     path::{IntoPath, SPath},
 };
 
-/// A [`WriteTxn`](super::WriteTxn) whose paths are relative to a fixed root.
+/// A [`WriteTxn`](crate::txn::WriteTxn) whose paths are relative to a fixed root.
 pub struct RootedWrite<'a> {
     txn:  &'a WriteTxn,
     root: SPath,

@@ -14,10 +14,10 @@ use crate::{
 /// loaded through this same trait.
 pub trait SData: Sized {
     /// Write accessor produced by `WriteTxn::fetch_mut` (a `StratoXXXMut` or
-    /// [`super::LeafMut`]).
+    /// [`LeafMut`](super::leaf::LeafMut)).
     type Mut<'t>: SMut<'t>;
 
-    /// Read accessor produced by `ReadTxn::fetch` (a `StratoXXX` or [`super::Leaf`]).
+    /// Read accessor produced by `ReadTxn::fetch` (a `StratoXXX` or [`Leaf`](super::leaf::Leaf)).
     type Ref<'t>: SRef<'t>;
 
     /// Decomposes `self` into the subtree rooted at `at`.

@@ -6,7 +6,7 @@ use crate::{
     path::{IntoPath, SPath},
 };
 
-/// A [`ReadTxn`](super::ReadTxn) whose paths are relative to a fixed root.
+/// A [`ReadTxn`](crate::txn::ReadTxn) whose paths are relative to a fixed root.
 pub struct RootedRead<'a> {
     txn:  &'a ReadTxn,
     root: SPath,
@@ -64,7 +64,7 @@ impl<'a> RootedRead<'a> {
     }
 
     /// Starts an [`IndexQuery`] scoped to this view's root: only entities at or
-    /// under the root are kept. See [`ReadTxn::query`](super::ReadTxn::query).
+    /// under the root are kept. See [`ReadTxn::query`](crate::txn::ReadTxn::query).
     pub fn query(&self, index: &str) -> IndexQuery<'a> {
         self.txn.query(index).under(self.root.clone())
     }
@@ -72,7 +72,7 @@ impl<'a> RootedRead<'a> {
     /// Finds the entities an index points at, keeping only those at or under this
     /// view's root, each recomposed as a `T`.
     ///
-    /// Like [`ReadTxn::find`](super::ReadTxn::find) but scoped to the view (the
+    /// Like [`ReadTxn::find`](crate::txn::ReadTxn::find) but scoped to the view (the
     /// root itself counts); the index is table-global, this filters its matches.
     pub fn find<T: SData>(&self, index: &str, values: &[Scalar]) -> SdbResult<Vec<T>> {
         self.query(index).prefixed(values).run()

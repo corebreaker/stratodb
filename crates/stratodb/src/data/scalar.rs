@@ -61,7 +61,7 @@ mod tag {
 /// A persisted scalar value: the content of a leaf node.
 ///
 /// This is the dynamic, runtime representation of any value StratoDB can store
-/// in a leaf. Rust types map to and from it through the [`SValue`] trait.
+/// in a leaf. Rust types map to and from it through the [`SValue`](super::SValue) trait.
 #[derive(Default, Clone, Debug, PartialEq)]
 #[non_exhaustive]
 pub enum Scalar {

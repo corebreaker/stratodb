@@ -1,3 +1,17 @@
+//! The dynamic, in-memory document type, [`Value`].
+//!
+//! `Value` mirrors the stored node tree — `Leaf(Scalar)` / `List` / `Node` —
+//! and is *faithful*: each leaf keeps its exact [`Scalar`], so it round-trips
+//! losslessly through [`load_value`](crate::txn::ReadTxn::load_value) /
+//! [`store_value`](crate::txn::WriteTxn::store_value). It is the one dynamic
+//! value type; textual export projects each leaf at render time rather than
+//! through a parallel type.
+//!
+//! Beyond the in-memory accessors (`leaf` / `list` / `node`, `get` / `at`,
+//! `push` / `insert` / `merge`, …) it carries path-addressed
+//! [`get_value`](Value::get_value) / [`set_value`](Value::set_value), which
+//! create containers as needed and never silently destroy data along the way.
+
 use crate::{
     data::Scalar,
     path::{IntoPath, SPath, Segment},
@@ -5,34 +19,45 @@ use crate::{
 
 use std::{collections::BTreeMap, mem::replace};
 
+/// A dynamic document: a scalar leaf, an ordered list, or a named map of
+/// values — the faithful in-memory mirror of the stored node tree.
 #[derive(Clone, Debug, PartialEq)]
 pub enum Value {
+    /// A single scalar value.
     Leaf(Scalar),
+    /// An ordered sequence of values, addressable by index.
     List(Vec<Value>),
+    /// A map of named values, kept in sorted key order.
     Node(BTreeMap<String, Value>),
 }
 
 impl Value {
+    /// A leaf holding `value`.
     pub fn new_leaf(value: Scalar) -> Self {
         Value::Leaf(value)
     }
 
+    /// An empty list.
     pub fn new_empty_list() -> Self {
         Value::List(Vec::new())
     }
 
+    /// An empty node (named map).
     pub fn new_empty_node() -> Self {
         Value::Node(BTreeMap::new())
     }
 
+    /// A list of the given values.
     pub fn new_list(list: Vec<Value>) -> Self {
         Value::List(list)
     }
 
+    /// A node wrapping the given map.
     pub fn new_node(node: BTreeMap<String, Value>) -> Self {
         Value::Node(node)
     }
 
+    /// The scalar, if this is a [`Leaf`](Value::Leaf).
     pub fn leaf(&self) -> Option<&Scalar> {
         match self {
             Self::Leaf(leaf) => Some(leaf),
@@ -40,6 +65,7 @@ impl Value {
         }
     }
 
+    /// A mutable reference to the scalar, if this is a [`Leaf`](Value::Leaf).
     pub fn leaf_mut(&mut self) -> Option<&mut Scalar> {
         match self {
             Self::Leaf(leaf) => Some(leaf),
@@ -47,6 +73,7 @@ impl Value {
         }
     }
 
+    /// The elements, if this is a [`List`](Value::List).
     pub fn list(&self) -> Option<&[Value]> {
         match self {
             Self::List(list) => Some(list),
@@ -54,6 +81,7 @@ impl Value {
         }
     }
 
+    /// A mutable reference to the element vector, if this is a [`List`](Value::List).
     pub fn list_mut(&mut self) -> Option<&mut Vec<Value>> {
         match self {
             Self::List(list) => Some(list),
@@ -61,6 +89,7 @@ impl Value {
         }
     }
 
+    /// The entries, if this is a [`Node`](Value::Node).
     pub fn node(&self) -> Option<&BTreeMap<String, Value>> {
         match self {
             Self::Node(node) => Some(node),
@@ -68,6 +97,7 @@ impl Value {
         }
     }
 
+    /// A mutable reference to the entry map, if this is a [`Node`](Value::Node).
     pub fn node_mut(&mut self) -> Option<&mut BTreeMap<String, Value>> {
         match self {
             Self::Node(node) => Some(node),
@@ -75,6 +105,7 @@ impl Value {
         }
     }
 
+    /// The element at `index`, if this is a list reaching that far.
     pub fn at(&self, index: usize) -> Option<&Value> {
         match self {
             Self::List(list) => list.get(index),
@@ -82,6 +113,8 @@ impl Value {
         }
     }
 
+    /// A mutable reference to the element at `index`, if this is a list reaching
+    /// that far.
     pub fn at_mut(&mut self, index: usize) -> Option<&mut Value> {
         match self {
             Self::List(list) => list.get_mut(index),
@@ -89,6 +122,7 @@ impl Value {
         }
     }
 
+    /// Whether this is a node containing `key`. `false` for a leaf or list.
     pub fn contains_key(&self, key: impl AsRef<str>) -> bool {
         if let Self::Node(node) = self {
             node.contains_key(key.as_ref())
@@ -97,6 +131,7 @@ impl Value {
         }
     }
 
+    /// The value under `key`, if this is a node containing it.
     pub fn get(&self, key: impl AsRef<str>) -> Option<&Value> {
         match self {
             Self::Node(node) => node.get(key.as_ref()),
@@ -104,6 +139,8 @@ impl Value {
         }
     }
 
+    /// A mutable reference to the value under `key`, if this is a node containing
+    /// it.
     pub fn get_mut(&mut self, key: impl AsRef<str>) -> Option<&mut Value> {
         match self {
             Self::Node(node) => node.get_mut(key.as_ref()),
@@ -111,6 +148,8 @@ impl Value {
         }
     }
 
+    /// Empties the value in place: a leaf becomes [`Null`](Scalar::Null), a list
+    /// or node drops its children (keeping its kind).
     pub fn clear(&mut self) {
         match self {
             Self::Leaf(scalar) => {
@@ -123,30 +162,42 @@ impl Value {
         }
     }
 
+    /// Appends `value` if this is a list; a no-op on a leaf or node.
     pub fn push(&mut self, value: Value) {
         if let Self::List(list) = self {
             list.push(value);
         }
     }
 
+    /// Inserts (or replaces) the `key` → `value` entry if this is a node; a no-op
+    /// on a leaf or list.
     pub fn insert(&mut self, key: String, value: Value) {
         if let Self::Node(node) = self {
             node.insert(key, value);
         }
     }
 
+    /// Removes the element at `index` if this is a list; a no-op on a leaf or
+    /// node. Panics if `index` is out of bounds (see [`Vec::remove`]).
     pub fn remove_at(&mut self, index: usize) {
         if let Self::List(list) = self {
             list.remove(index);
         }
     }
 
+    /// Removes the `key` entry if this is a node; a no-op on a leaf or list.
     pub fn remove_key(&mut self, key: impl AsRef<str>) {
         if let Self::Node(node) = self {
             node.remove(key.as_ref());
         }
     }
 
+    /// Merges `with` into `self`, by kind:
+    ///
+    /// - a [`Leaf`](Value::Leaf) is replaced wholesale by `with`;
+    /// - a [`List`](Value::List) extends with another list's elements, or pushes a non-list `with` as one more element;
+    /// - a [`Node`](Value::Node) extends with another node (overwriting duplicate keys), or is replaced wholesale by a
+    ///   non-node `with`.
     pub fn merge(&mut self, with: Self) {
         match self {
             Self::Leaf(_) => {
@@ -273,6 +324,7 @@ fn build_fresh(segments: &[Segment], value: Value) -> Option<Value> {
 }
 
 impl Default for Value {
+    /// The empty default is a [`Null`](Scalar::Null) leaf.
     fn default() -> Self {
         Value::Leaf(Scalar::Null)
     }

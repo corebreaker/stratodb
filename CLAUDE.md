@@ -25,15 +25,13 @@ stratodb/
 │   ├── stratodb/               runtime crate
 │   │   ├── src/
 │   │   ├── tests/
+│   │   ├── examples/           runnable examples (basic.rs, indexed.rs)
 │   │   └── Cargo.toml
-│   ├── stratodb-derive/        proc-macro crate (#[derive(SData)])
-│   │   └── src/
-│   └── examples/               runnable examples (not a Cargo member — excluded via workspace.exclude)
-│       ├── basic.rs
-│       └── indexed.rs
+│   └── stratodb-derive/        proc-macro crate (#[derive(SData)])
+│       └── src/
 ```
 
-`crates/examples/` has no `Cargo.toml`; examples are declared as `[[example]]` targets in `crates/stratodb/Cargo.toml`. The workspace `exclude = ["crates/examples"]` prevents Cargo from treating the directory as a broken member.
+The workspace is just the two crates (`members = ["crates/*"]`, no `exclude`). Examples live under `crates/stratodb/examples/` and are declared as `[[example]]` targets in `crates/stratodb/Cargo.toml` (`indexed` carries `required-features = ["derive"]`).
 
 ---
 
@@ -247,6 +245,7 @@ Generated code is fully `::stratodb::`-qualified (no import assumptions; trait m
 | `tests/value.rs` | — | dynamic `Value`: `store_value`/`load_value` round-trips, `get_value`/`set_value`, `Value`'s own `JsonExporter`/`YamlExporter` |
 | `tests/derive.rs` | `derive` | #[derive(SData)]: structs/enums + every `#[strato(...)]` attr (rename/skip/default/with, from/into/try_from, enum reps, generics+bound, flatten) |
 | `tests/index_typed.rs` | `derive` | end-to-end derived indexes (back-fill, composite prefix, unique, reopen) |
+| `tests/cross_feature.rs` | `derive` (+ `bignum`) | feature seams together: a derived+renamed entity with an enum field, indexed (unique + non-unique), exported to JSON/YAML, round-tripped through `Value`; a `#[cfg(feature = "bignum")]` module covers a BigInt index ordering by value and bignum scalars exporting |
 
 Big-number coverage lives in `src` unit tests, not a `tests/` file: `data/scalar.rs` (storage round-trips), `index/ordered.rs` (value ordering), and `data/bignum.rs` (as-data round-trips via an in-memory DB, gated on a `*-as-data`-only combo).
 
@@ -348,13 +347,14 @@ Hand-rolled JSON/YAML export (no serde, no external dependency) plus a dynamic, 
 
 There is exactly **one** dynamic value type: an earlier `ExportValue` was folded into `Value` (the export now projects each leaf's `Scalar` at render time instead of pre-projecting into a second type).
 
-### PAUSED — Milestone 4 (docs and polish)
+### Milestone 4 (docs and polish) — mostly done
 
-- README (currently a one-liner)
-- Crate-level rustdoc example showcasing indexes (currently only put/get in `lib.rs`)
-- Any remaining cross-feature integration tests
+- **DONE** — README: a full guide (overview, data model, quickstart, derive + `#[strato(...)]` table, indexes, dynamic `Value`, JSON/YAML export, big numbers, the Cargo-feature matrix, transactions, examples, status).
+- **DONE** — Crate-level rustdoc (`lib.rs`): runnable getting-started + secondary-index examples (the index one is feature-agnostic — it recomposes hits as `BTreeMap<String, u32>` so the doctest needs no `derive`) plus a "what else is here" tour. Doctests only ever run under `--all-features --doc` in the gate.
+- **DONE** — Cross-feature integration tests (`tests/cross_feature.rs`).
+- Runnable examples were already done (`basic.rs`, `indexed.rs`).
 
-Runnable examples are already done (`basic.rs`, `indexed.rs`).
+`cargo doc` is warning-clean across the workspace and every feature set (`RUSTDOCFLAGS="-D warnings" cargo doc --no-deps` with `--features derive` / `--all-features` / none all pass) — a one-time sweep fixed every broken/private intra-doc link in both crates. This check is **not** part of the standard gate; re-run it after touching doc-comments. Links to private items (`PathCache`, `crate::tree`, the private `index_attr`/`query` modules) were turned into plain code spans or dropped, since rustdoc rejects a public item linking to a private one.
 
 ---
 

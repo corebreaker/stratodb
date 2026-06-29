@@ -17,7 +17,7 @@ use std::sync::{atomic::Ordering, Arc};
 ///
 /// Cloning is cheap. Reads run concurrently; writes are serialized (a single
 /// writer at a time), matching the underlying engine's transaction model. The
-/// handle carries a shared [`PathCache`] so a transaction's accessors reuse
+/// handle carries a shared `PathCache` so a transaction's accessors reuse
 /// resolved paths.
 #[derive(Clone)]
 pub struct Table {
@@ -105,7 +105,7 @@ impl Table {
     }
 
     /// Registers every index that `T` declares (via `#[strato(index(...))]`),
-    /// scoping each to `pattern`. A shorthand for calling [`create_index`] for each
+    /// scoping each to `pattern`. A shorthand for calling [`create_index`](Self::create_index) for each
     /// of [`T::index_defs`](SIndexed::index_defs); each is idempotent and
     /// back-filled.
     pub fn create_indexes<T: SIndexed>(&self, pattern: &str) -> SdbResult<()> {
