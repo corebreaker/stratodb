@@ -158,6 +158,102 @@ fn derived_index_attributes_declare_and_create() {
     assert!(matches!(err, SdbError::UniqueViolation { .. }), "got {err:?}");
 }
 
+#[test]
+fn delete_indexes_drops_every_declared_index() {
+    let db = StratoDb::create_in_memory().unwrap();
+    let people = db.open_table("people").unwrap();
+    people.create_indexes::<Person>("people/*").unwrap();
+
+    // Seed data so the drop must purge real entries, not just registrations.
+    let w = people.write().unwrap();
+    w.store(
+        "people/p1",
+        &Person {
+            age:  30,
+            name: String::from("Alice"),
+        },
+    )
+    .unwrap();
+    w.commit().unwrap();
+
+    for name in ["people_by_age", "people_by_name", "people_by_age_name"] {
+        assert!(people.has_index(name).unwrap(), "{name} should exist");
+    }
+
+    // One call drops all three indexes the type declares, mirroring `create_indexes`.
+    assert_eq!(people.delete_indexes::<Person>().unwrap(), 3);
+
+    for name in ["people_by_age", "people_by_name", "people_by_age_name"] {
+        assert!(!people.has_index(name).unwrap(), "{name} should be gone");
+    }
+
+    // Idempotent: a second sweep finds nothing left to remove.
+    assert_eq!(people.delete_indexes::<Person>().unwrap(), 0);
+
+    // The unique constraint `people_by_name` enforced is now lifted — a duplicate
+    // name stores without violation.
+    let w = people.write().unwrap();
+    w.store(
+        "people/p2",
+        &Person {
+            age:  31,
+            name: String::from("Alice"),
+        },
+    )
+    .unwrap();
+    w.commit().unwrap();
+    assert_eq!(people.read().unwrap().get::<i32>("people/p2/age").unwrap(), Some(31));
+}
+
+#[test]
+fn ensure_indexes_creates_missing_and_skips_present() {
+    let db = StratoDb::create_in_memory().unwrap();
+    let people = db.open_table("people").unwrap();
+
+    // Pre-create one of the three indexes the type declares (identical definition).
+    people
+        .create_index(&IndexDef::new(
+            String::from("people_by_age"),
+            String::from("people/*"),
+            vec![IndexColumn::asc(SPath::parse("age").unwrap())],
+            false,
+        ))
+        .unwrap();
+
+    // `ensure_indexes` adds the two missing ones and leaves the present one as-is.
+    people.ensure_indexes::<Person>("people/*").unwrap();
+    for name in ["people_by_age", "people_by_name", "people_by_age_name"] {
+        assert!(people.has_index(name).unwrap(), "{name} should exist");
+    }
+
+    // Idempotent: a second sweep is a no-op (no error).
+    people.ensure_indexes::<Person>("people/*").unwrap();
+
+    // The ensured indexes are live: maintenance runs and the unique one enforces.
+    let w = people.write().unwrap();
+    w.store(
+        "people/p1",
+        &Person {
+            age:  30,
+            name: String::from("Alice"),
+        },
+    )
+    .unwrap();
+    w.commit().unwrap();
+
+    let w = people.write().unwrap();
+    let err = w
+        .store(
+            "people/p2",
+            &Person {
+                age:  99,
+                name: String::from("Alice"),
+            },
+        )
+        .unwrap_err();
+    assert!(matches!(err, SdbError::UniqueViolation { .. }), "got {err:?}");
+}
+
 #[derive(SData, Debug, PartialEq)]
 #[strato(index(name = "by_dept", columns(dept)))]
 #[strato(index(name = "by_dept_salary", columns(dept, salary desc)))]

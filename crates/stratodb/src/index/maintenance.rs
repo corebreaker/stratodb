@@ -39,6 +39,42 @@ pub(crate) fn delete(data: &mut DataTable<'_>, indexes: &[IndexEntry], scope: &S
     Ok(())
 }
 
+/// Removes every physical entry belonging to `entry`, across all indexed
+/// entities. Call when an index is dropped: its registry record is gone, so its
+/// entries in the data table must go too.
+///
+/// An index's entries occupy one contiguous key block — the same leading
+/// `tag · id`, the `unique` flag fixing the tag — so a single forward range scan
+/// from that id's lower bound, stopping at the first entry with a different id,
+/// covers exactly this index and nothing else (ids are never reused, so no other
+/// index shares one).
+pub(crate) fn delete_all(data: &mut DataTable<'_>, entry: &IndexEntry) -> SdbResult<()> {
+    let id = entry.id();
+    let lower = TableKey::Index {
+        id,
+        cols: Vec::new(),
+        entity: (!entry.def().unique()).then(|| Skey::from_bytes([0x00; 16])),
+    };
+
+    let mut keys = Vec::new();
+    for item in data.range(lower..)? {
+        let (key, _) = item?;
+        let table_key = key.value();
+
+        if !matches!(&table_key, TableKey::Index { id: entry_id, .. } if *entry_id == id) {
+            break;
+        }
+
+        keys.push(table_key);
+    }
+
+    for key in keys {
+        data.remove(&key)?;
+    }
+
+    Ok(())
+}
+
 /// Inserts the index entries the affected entities now imply. Call after applying
 /// a mutation at `scope`. A unique index rejects an entry whose key already maps
 /// to a different entity with [`SdbError::UniqueViolation`].

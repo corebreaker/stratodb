@@ -146,7 +146,7 @@ The derive supports a Serde-style attribute set under the `strato` namespace:
 | Misc | `expecting`, `flatten` |
 
 ```rust
-# use stratodb::SData;
+use stratodb::SData;
 #[derive(SData)]
 #[strato(rename_all = "camelCase")]
 struct Event {
@@ -197,7 +197,7 @@ fn main() -> stratodb::SdbResult<()> {
 Or declare indexes right on a derived type and register them in one call:
 
 ```rust
-# use stratodb::{data::Scalar, SData, StratoDb};
+use stratodb::{data::Scalar, SData, StratoDb};
 #[derive(SData)]
 #[strato(index(name = "by_team", columns(team)))]
 #[strato(index(name = "by_email", columns(email), unique))]
@@ -218,17 +218,36 @@ members.create_indexes::<Member>("members/*")?;   // both indexes, scoped + back
 `find` is the common exact/prefix lookup. For reverse order, partial (prefix) matches, or a subtree scope, build a query:
 
 ```rust
-# use stratodb::{data::Scalar, txn::ReadTxn};
-# fn demo(r: &ReadTxn) -> stratodb::SdbResult<()> {
-let newest: Vec<u64> = r.query("by_created")
-    .prefixed(&[Scalar::Str(String::from("eng"))])  // leading column(s)
-    .reversed()                                      // descending
-    .run()?;
-# Ok(())
-# }
+use stratodb::{data::Scalar, txn::ReadTxn};
+fn demo(r: &ReadTxn) -> stratodb::SdbResult<()> {
+    let newest: Vec<u64> = r.query("by_created")
+        .prefixed(&[Scalar::Str(String::from("eng"))])  // leading column(s)
+        .reversed()                                      // descending
+        .run()?;
+    Ok(())
+}
 ```
 
 A unique index rejects a second entity producing the same column tuple with `SdbError::UniqueViolation`; the offending write rolls back.
+
+Indexes can be ensured, inspected, and dropped:
+
+```rust
+use stratodb::{index::IndexDef, Table};
+fn demo(members: &Table, def: &IndexDef) -> stratodb::SdbResult<()> {
+    members.ensure_index(def)?;             // create + back-fill only if absent; no-op (no error) if a same-named index exists
+    members.ensure_indexes::<Member>("members/*")?;   // same, for every index the type declares
+
+    members.has_index("by_team")?;          // presence check — no IndexDef is deserialized
+    members.index_def("by_team")?;          // the full definition, if it exists
+
+    members.delete_index("by_team")?;       // drop one: registration + every entry, atomically; returns whether it existed
+    members.delete_indexes::<Member>()?;    // drop every index a type declares (mirror of create_indexes); returns the count removed
+    Ok(())
+}
+```
+
+`ensure_index` / `ensure_indexes` are the idempotent-by-name counterparts of `create_index` / `create_indexes`: an absent index is created and back-filled, but a name already in use is left exactly as it is — unlike `create_index`, which errors with `SchemaMismatch` on a divergent redefinition. `has_index` is optimized for presence alone — it scans the registry without materializing any `IndexDef` (no column path is parsed). `delete_index` removes the registry record and purges every entry the index holds in one transaction; it is idempotent (`false` when no such index exists). Both `delete_*` leave the indexed data untouched.
 
 ---
 

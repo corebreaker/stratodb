@@ -111,7 +111,7 @@ These choices are final and must not be revisited or worked around:
 
 **Engine (redb) is opaque.** No redb type in the public API. No `pub use redb::…` anywhere.
 
-**Index model.** Secondary indexes are named, composite (ordered columns), per-column ASC/DESC, with optional uniqueness. Non-unique: entity in the key (`INDEX_DUP` tag). Unique: entity in the value (`INDEX_UNIQUE` tag); collision = `UniqueViolation`. Scope = path pattern (e.g., `"users/*"`); `*` is a one-segment wildcard. Order-preserving encoding: DESC = bitwise complement; strings use a two-byte `0x00 0x01` terminator (escape `0x00` → `0x00 0xFF`) so encodings are prefix-free.
+**Index model.** Secondary indexes are named, composite (ordered columns), per-column ASC/DESC, with optional uniqueness. Non-unique: entity in the key (`INDEX_DUP` tag). Unique: entity in the value (`INDEX_UNIQUE` tag); collision = `UniqueViolation`. Scope = path pattern (e.g., `"users/*"`); `*` is a one-segment wildcard. Order-preserving encoding: DESC = bitwise complement; strings use a two-byte `0x00 0x01` terminator (escape `0x00` → `0x00 0xFF`) so encodings are prefix-free. Lifecycle: `create_index`/`create_indexes::<T>` register + back-fill (error on a divergent same-name redefinition); `ensure_index`/`ensure_indexes::<T>` are the idempotent-by-name variant (create + back-fill if absent, no-op — no error — if a same-name index already exists, whatever its definition); `index_def`/`has_index` introspect (`has_index` is a name-only registry scan that never materializes an `IndexDef`); `delete_index`/`delete_indexes::<T>` drop, removing the registry record and purging every physical entry in one transaction. Dropping leaves `next_id` untouched — index ids are never reused.
 
 **Write-time index maintenance.** Every mutation goes through `WriteTxn::reindex_around(scope, apply)`: delete affected index entries, apply the mutation, re-insert. The index set is loaded once per transaction into an `OnceLock<Vec<IndexEntry>>` (not `OnceCell` — keeps `WriteTxn: Sync` so `Arc<WriteCursor>` in `fetch_mut` passes clippy `arc_with_non_send_sync`).
 
@@ -134,7 +134,7 @@ src/
 ├── db/                     StratoDb (database.rs); DbInner (inner.rs: generation, version_lock, caches)
 ├── key.rs                  Skey (opaque 16-byte UUIDv7 primary key)
 ├── node/                   NodeKind (kind.rs) + Node Object/List/Leaf + encoding (definition.rs)
-├── table.rs                Table handle → read()/write()/create_index()
+├── table.rs                Table handle → read()/write()/create_index(es)/ensure_index(es)/index_def/has_index/delete_index(es)
 ├── tree.rs                 tree walk, node resolution, list helpers
 ├── value.rs                Value enum — dynamic Leaf/List/Node tree + get_value/set_value/subtree
 ├── codec/                  byte encoding (putters, reader)
@@ -163,12 +163,12 @@ src/
 │   └── tail.rs             PathTail trait + / and /= operators on SPath
 ├── index/
 │   ├── definitions/        IndexDef, IndexColumn, Direction
-│   ├── registry/           $metadata registry (create/lookup/list by table)
+│   ├── registry/           $metadata registry (create/lookup/list/has/delete by table; has = name-only scan, no IndexDef materialized)
 │   ├── id.rs               IndexId
 │   ├── indexed.rs          SIndexed trait
 │   ├── ordered.rs          order-preserving Scalar codec (incl. bignum: length-prefixed int, decimal-float, continued-fraction rational)
 │   ├── pattern.rs          Pattern (*-wildcard) + affected_entities(scope)
-│   └── maintenance.rs      delete + insert (bracket every mutation)
+│   └── maintenance.rs      delete + insert (bracket every mutation); delete_all (purge every entry of one index when dropped)
 ├── export/                 JSON/YAML rendering of a Value (the JsonExporter/YamlExporter traits)
 │   ├── exporter.rs         JsonExporter/YamlExporter traits + impls for ReadTxn and Value
 │   ├── json.rs             to_json(&Value, indent) — compact / pretty
@@ -240,11 +240,11 @@ Generated code is fully `::stratodb::`-qualified (no import assumptions; trait m
 | `tests/typed.rs` | — | hand-written SData + accessor contract (reference for derive output) |
 | `tests/containers.rs` | — | Vec/Option/BTreeMap/Bytes roundtrips + accessor API |
 | `tests/rooted.rs` | — | RootedRead/RootedWrite, relative paths, scoped index queries |
-| `tests/indexes.rs` | — | index registry, maintenance, query builder, unique enforcement |
+| `tests/indexes.rs` | — | index registry, maintenance, query builder, unique enforcement, `ensure_index` (create-if-absent, no-op on present/divergent), `has_index`/`delete_index` (registry purge + physical entries, idempotent, other indexes & data intact, recreate, reopen) |
 | `tests/export.rs` | — | JSON/YAML export of stored subtrees (compact/pretty/block, scalar rendering, missing path, scalar & list roots) |
 | `tests/value.rs` | — | dynamic `Value`: `store_value`/`load_value` round-trips, `get_value`/`set_value`, `Value`'s own `JsonExporter`/`YamlExporter` |
 | `tests/derive.rs` | `derive` | #[derive(SData)]: structs/enums + every `#[strato(...)]` attr (rename/skip/default/with, from/into/try_from, enum reps, generics+bound, flatten) |
-| `tests/index_typed.rs` | `derive` | end-to-end derived indexes (back-fill, composite prefix, unique, reopen) |
+| `tests/index_typed.rs` | `derive` | end-to-end derived indexes (back-fill, composite prefix, unique, reopen) + `ensure_indexes::<T>()` (creates missing, skips present, idempotent) + `delete_indexes::<T>()` (drops every declared index, returns the count, idempotent) |
 | `tests/cross_feature.rs` | `derive` (+ `bignum`) | feature seams together: a derived+renamed entity with an enum field, indexed (unique + non-unique), exported to JSON/YAML, round-tripped through `Value`; a `#[cfg(feature = "bignum")]` module covers a BigInt index ordering by value and bignum scalars exporting |
 
 Big-number coverage lives in `src` unit tests, not a `tests/` file: `data/scalar.rs` (storage round-trips), `index/ordered.rs` (value ordering), and `data/bignum.rs` (as-data round-trips via an in-memory DB, gated on a `*-as-data`-only combo).

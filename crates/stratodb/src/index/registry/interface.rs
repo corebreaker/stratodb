@@ -31,3 +31,15 @@ pub(crate) fn for_table<T: ReadableTable<&'static str, &'static [u8]>>(
 ) -> SdbResult<Vec<IndexEntry>> {
     RegistryRepository::for_table(meta, table)
 }
+
+/// Reports whether an index named `name` is registered on `table`, without
+/// materializing any [`IndexDef`] (it decodes only each record's table and name).
+pub(crate) fn has<T: ReadableTable<&'static str, &'static [u8]>>(meta: &T, table: &str, name: &str) -> SdbResult<bool> {
+    RegistryRepository::has(meta, table, name)
+}
+
+/// Removes the index named `name` from `table`, returning the removed entry (or
+/// `None` if absent) so its physical entries can be purged.
+pub(crate) fn delete(meta: &mut MetaTable<'_>, table: &str, name: &str) -> SdbResult<Option<IndexEntry>> {
+    RegistryRepository::delete(meta, table, name)
+}

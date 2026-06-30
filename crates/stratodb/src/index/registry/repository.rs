@@ -101,6 +101,63 @@ impl RegistryRepository {
         Ok(entries)
     }
 
+    /// Reports whether an index named `name` is registered on `table`, decoding
+    /// only each record's table and index name — never a full [`IndexDef`]. It
+    /// walks the registry blob in place (skipping every record's columns and
+    /// pattern via [`IndexDef::decode_name`]) and stops at the first match, so it
+    /// allocates nothing and parses no column paths.
+    pub(crate) fn has<T: ReadableTable<&'static str, &'static [u8]>>(
+        meta: &T,
+        table: &str,
+        name: &str,
+    ) -> SdbResult<bool> {
+        let Some(guard) = meta.get(META_INDEX_REGISTRY_KEY)? else {
+            return Ok(false);
+        };
+
+        let mut r = Reader::new(guard.value());
+        let _next_id = r.u32()?;
+        let count = r.u32()?;
+
+        for _ in 0..count {
+            let same_table = std::str::from_utf8(r.bytes()?)
+                .map_err(|_| SdbError::Corrupt("invalid utf-8 in index registry".into()))?
+                == table;
+
+            let _id = r.u32()?;
+            let entry_name = IndexDef::decode_name(&mut r)?;
+
+            if same_table && entry_name == name {
+                return Ok(true);
+            }
+        }
+
+        Ok(false)
+    }
+
+    /// Removes the index named `name` on `table`, returning the entry that was
+    /// removed (so its physical entries can be purged) or `None` when no such
+    /// index exists. The `next_id` allocator is deliberately left untouched — ids
+    /// are never reused, so a stale physical entry can never collide with a future
+    /// index.
+    pub(super) fn delete(meta: &mut MetaTable<'_>, table: &str, name: &str) -> SdbResult<Option<IndexEntry>> {
+        let mut registry = Self::load(meta)?;
+
+        let pos = registry
+            .entries
+            .iter()
+            .position(|e| e.table() == table && e.def().name() == name);
+
+        let Some(pos) = pos else {
+            return Ok(None);
+        };
+
+        let entry = registry.entries.remove(pos);
+        registry.store(meta)?;
+
+        Ok(Some(entry))
+    }
+
     /// Registers `def`, returning whether a new index was created (`false` when an
     /// identical one already existed — idempotent).
     pub(super) fn create(meta: &mut MetaTable<'_>, table: &str, def: &IndexDef) -> SdbResult<bool> {
