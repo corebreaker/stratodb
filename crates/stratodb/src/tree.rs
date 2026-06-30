@@ -39,18 +39,11 @@ pub(crate) fn read_node<B: ReadNodes>(b: &B, key: Skey) -> SdbResult<Option<Node
 // --------------------------------------------------------------------------
 
 /// The child key under object `parent` for field `name`, if present. A single
-/// point lookup — no parent node is read or deserialized.
+/// point lookup — no parent node is read or deserialized. Routed through
+/// [`ReadNodes::child_link`] so the in-memory backend can answer by borrowed name
+/// without allocating a key on every navigation hop.
 fn object_child<B: ReadNodes>(b: &B, parent: Skey, name: &str) -> SdbResult<Option<Skey>> {
-    let key = TableKey::Child {
-        parent,
-        name: name.to_string(),
-    };
-
-    match b.fetch(&key)? {
-        Some(TableValue::Skey(child)) => Ok(Some(child)),
-        Some(_) => Err(SdbError::Corrupt("object child link is not a key".into())),
-        None => Ok(None),
-    }
+    b.child_link(parent, name)
 }
 
 /// Every `(name, child key)` of object `parent`, in ascending name order — one

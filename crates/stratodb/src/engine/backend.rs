@@ -15,14 +15,15 @@
 use super::{TableKey, TableValue};
 use crate::{
     codec::{self, Reader},
-    error::SdbResult,
+    data::Scalar,
+    error::{SdbError, SdbResult},
     node::Node,
     node::NodeKind,
     Skey,
 };
 
 use redb::{ReadableTable, Table};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap};
 
 /// An iterator over engine entries from a lower bound, in ascending key order.
 pub(crate) type NodeIter<'a> = Box<dyn Iterator<Item = SdbResult<(TableKey, TableValue)>> + 'a>;
@@ -34,6 +35,23 @@ pub(crate) trait ReadNodes {
     /// Entries at or after `lower`, in ascending key order. Callers stop as soon as
     /// a key falls outside the range they care about (e.g. a child block).
     fn scan_from(&self, lower: &TableKey) -> SdbResult<NodeIter<'_>>;
+
+    /// The child key under object `parent` for field `name`. The default builds the
+    /// `Child` key and fetches it; the in-memory backend overrides this to look up
+    /// by borrowed name, avoiding a `String` allocation on every navigation hop
+    /// (the read/recompose hot path runs entirely over that backend).
+    fn child_link(&self, parent: Skey, name: &str) -> SdbResult<Option<Skey>> {
+        let key = TableKey::Child {
+            parent,
+            name: name.to_string(),
+        };
+
+        match self.fetch(&key)? {
+            Some(TableValue::Skey(child)) => Ok(Some(child)),
+            Some(_) => Err(crate::error::SdbError::Corrupt("object child link is not a key".into())),
+            None => Ok(None),
+        }
+    }
 }
 
 /// Read/write access to a node store.
@@ -75,12 +93,44 @@ impl WriteNodes for Table<'_, TableKey, TableValue> {
 
 // -- in-memory mini node-table -------------------------------------------------
 
-/// An in-memory node store ordered exactly like the engine (by the
-/// order-preserving [`TableKey`] encoding), so the tree logic — including the
-/// child-block range scans — behaves identically over it.
+/// A node held in the in-memory store. An object keeps its children **inline**
+/// (a name-sorted map), so a child lookup is a direct map access with no key
+/// allocation — unlike the engine table, where object children are separate
+/// `Child` entries. A list and a leaf mirror the engine node.
+#[derive(Clone, Debug)]
+enum MemNode {
+    Object(BTreeMap<String, Skey>),
+    List(Vec<Skey>),
+    Leaf(Scalar),
+}
+
+impl MemNode {
+    fn kind(&self) -> NodeKind {
+        match self {
+            MemNode::Object(_) => NodeKind::Object,
+            MemNode::List(_) => NodeKind::List,
+            MemNode::Leaf(_) => NodeKind::Leaf,
+        }
+    }
+
+    /// The engine [`Node`] this in-memory node presents (an object is a marker —
+    /// its children live in `Child` entries at the engine boundary).
+    fn engine_node(&self) -> Node {
+        match self {
+            MemNode::Object(_) => Node::Object,
+            MemNode::List(items) => Node::List(items.clone()),
+            MemNode::Leaf(scalar) => Node::Leaf(scalar.clone()),
+        }
+    }
+}
+
+/// An in-memory mini node-table backing a packed entity. Objects store children
+/// inline for allocation-free navigation; the **on-disk blob is unchanged** — it
+/// is still the engine's `(key, value)` entry list (see [`to_blob`](Self::to_blob)
+/// / [`from_blob`](Self::from_blob)), just assembled into this faster shape.
 #[derive(Clone, Debug, Default)]
 pub(crate) struct MemNodes {
-    entries: BTreeMap<TableKey, TableValue>,
+    nodes: HashMap<Skey, MemNode>,
 }
 
 impl MemNodes {
@@ -89,25 +139,49 @@ impl MemNodes {
         Self::default()
     }
 
-    /// The kind of the subtree root (node [`Skey::ROOT`] within this store), used
-    /// to tag the packed node so its kind is known without decoding the blob.
+    /// The kind of the subtree root (node [`Skey::ROOT`]). A never-written entity
+    /// (e.g. an empty struct) packs as an empty object.
     pub(crate) fn root_kind(&self) -> SdbResult<NodeKind> {
-        match self.entries.get(&TableKey::Data(Skey::ROOT)) {
-            Some(TableValue::Node(node)) => Ok(node.kind()),
-            // A never-written entity (e.g. an empty struct) packs as an empty object.
-            _ => Ok(NodeKind::Object),
-        }
+        Ok(self
+            .nodes
+            .get(&Skey::ROOT)
+            .map(MemNode::kind)
+            .unwrap_or(NodeKind::Object))
     }
 
-    /// Serializes the store into a packed-entity blob: a length-prefixed list of
-    /// `(key, value)` byte pairs, in key order.
+    /// Serializes the store into a packed-entity blob: the engine entry list —
+    /// each node a `Data` entry, plus a `Child` entry per object link.
     pub(crate) fn to_blob(&self) -> Vec<u8> {
-        let mut buf = Vec::new();
-        codec::put_u32(&mut buf, self.entries.len() as u32);
+        let count: usize = self
+            .nodes
+            .values()
+            .map(|node| {
+                1 + if let MemNode::Object(children) = node {
+                    children.len()
+                } else {
+                    0
+                }
+            })
+            .sum();
 
-        for (key, value) in &self.entries {
-            codec::put_bytes(&mut buf, &key.encode());
-            codec::put_bytes(&mut buf, &value.encode());
+        let mut buf = Vec::new();
+        codec::put_u32(&mut buf, count as u32);
+
+        for (key, node) in &self.nodes {
+            codec::put_bytes(&mut buf, &TableKey::Data(*key).encode());
+            codec::put_bytes(&mut buf, &TableValue::Node(node.engine_node()).encode());
+
+            if let MemNode::Object(children) = node {
+                for (name, child) in children {
+                    let link = TableKey::Child {
+                        parent: *key,
+                        name:   name.clone(),
+                    };
+
+                    codec::put_bytes(&mut buf, &link.encode());
+                    codec::put_bytes(&mut buf, &TableValue::Skey(*child).encode());
+                }
+            }
         }
 
         buf
@@ -118,16 +192,67 @@ impl MemNodes {
         let mut r = Reader::new(blob);
         let count = r.u32()? as usize;
 
-        let mut entries = BTreeMap::new();
+        let mut mem = MemNodes::default();
         for _ in 0..count {
             let key = TableKey::decode(r.bytes()?)?;
             let value = TableValue::decode(r.bytes()?)?;
-            entries.insert(key, value);
+            mem.apply(key, value)?;
         }
 
-        Ok(MemNodes {
-            entries,
-        })
+        Ok(mem)
+    }
+
+    /// Folds one decoded engine `(key, value)` entry into the inline rep.
+    fn apply(&mut self, key: TableKey, value: TableValue) -> SdbResult<()> {
+        match key {
+            TableKey::Data(node_key) => {
+                let node = match value {
+                    TableValue::Node(Node::Object) => MemNode::Object(BTreeMap::new()),
+                    TableValue::Node(Node::List(items)) => MemNode::List(items),
+                    TableValue::Node(Node::Leaf(scalar)) => MemNode::Leaf(scalar),
+                    TableValue::Node(Node::Packed {
+                        ..
+                    }) => {
+                        return Err(SdbError::Corrupt("nested packed entity in a blob".into()));
+                    }
+                    _ => return Err(SdbError::Corrupt("data entry is not a node".into())),
+                };
+
+                // Re-applying an object marker keeps any children already folded in.
+                if matches!(
+                    (self.nodes.get(&node_key), &node),
+                    (Some(MemNode::Object(_)), MemNode::Object(_))
+                ) {
+                    return Ok(());
+                }
+
+                self.nodes.insert(node_key, node);
+            }
+            TableKey::Child {
+                parent,
+                name,
+            } => {
+                let TableValue::Skey(child) = value else {
+                    return Err(SdbError::Corrupt("object child link is not a key".into()));
+                };
+
+                match self
+                    .nodes
+                    .entry(parent)
+                    .or_insert_with(|| MemNode::Object(BTreeMap::new()))
+                {
+                    MemNode::Object(children) => {
+                        children.insert(name, child);
+                    }
+                    _ => return Err(SdbError::Corrupt("child link parent is not an object".into())),
+                }
+            }
+            TableKey::Index {
+                ..
+            } => return Err(SdbError::Corrupt("index entry in a blob".into())),
+        }
+
+        Ok(())
     }
 
     /// Packs this store into a [`Node::Packed`] carrying its root kind and blob.
@@ -138,35 +263,114 @@ impl MemNodes {
         })
     }
 
-    /// Consumes the store, yielding its `(key, value)` entries in key order. Used
-    /// to spill a packed entity back into the live table (unpacking).
+    /// Consumes the store, yielding its engine `(key, value)` entries. Used to
+    /// spill a packed entity back into the live table (unpacking).
     pub(crate) fn into_entries(self) -> impl Iterator<Item = (TableKey, TableValue)> {
-        self.entries.into_iter()
+        let mut out = Vec::new();
+
+        for (key, node) in self.nodes {
+            match node {
+                MemNode::Object(children) => {
+                    out.push((TableKey::Data(key), TableValue::Node(Node::Object)));
+                    for (name, child) in children {
+                        out.push((
+                            TableKey::Child {
+                                parent: key,
+                                name,
+                            },
+                            TableValue::Skey(child),
+                        ));
+                    }
+                }
+                MemNode::List(items) => out.push((TableKey::Data(key), TableValue::Node(Node::List(items)))),
+                MemNode::Leaf(scalar) => out.push((TableKey::Data(key), TableValue::Node(Node::Leaf(scalar)))),
+            }
+        }
+
+        out.into_iter()
     }
 }
 
 impl ReadNodes for MemNodes {
     fn fetch(&self, key: &TableKey) -> SdbResult<Option<TableValue>> {
-        Ok(self.entries.get(key).cloned())
+        match key {
+            TableKey::Data(node_key) => Ok(self
+                .nodes
+                .get(node_key)
+                .map(|node| TableValue::Node(node.engine_node()))),
+            TableKey::Child {
+                parent,
+                name,
+            } => Ok(match self.nodes.get(parent) {
+                Some(MemNode::Object(children)) => children.get(name).map(|child| TableValue::Skey(*child)),
+                _ => None,
+            }),
+            TableKey::Index {
+                ..
+            } => Ok(None),
+        }
     }
 
     fn scan_from(&self, lower: &TableKey) -> SdbResult<NodeIter<'_>> {
-        Ok(Box::new(
-            self.entries
-                .range(lower.clone()..)
-                .map(|(key, value)| Ok((key.clone(), value.clone()))),
-        ))
+        // The tree only scans a parent's `Child` block (object children); other
+        // bounds never occur here.
+        let TableKey::Child {
+            parent,
+            name,
+        } = lower
+        else {
+            return Ok(Box::new(std::iter::empty()));
+        };
+
+        match self.nodes.get(parent) {
+            Some(MemNode::Object(children)) => {
+                let parent = *parent;
+
+                Ok(Box::new(children.range(name.clone()..).map(move |(name, child)| {
+                    Ok((
+                        TableKey::Child {
+                            parent,
+                            name: name.clone(),
+                        },
+                        TableValue::Skey(*child),
+                    ))
+                })))
+            }
+            _ => Ok(Box::new(std::iter::empty())),
+        }
+    }
+
+    fn child_link(&self, parent: Skey, name: &str) -> SdbResult<Option<Skey>> {
+        Ok(match self.nodes.get(&parent) {
+            Some(MemNode::Object(children)) => children.get(name).copied(),
+            _ => None,
+        })
     }
 }
 
 impl WriteNodes for MemNodes {
     fn put(&mut self, key: TableKey, value: TableValue) -> SdbResult<()> {
-        self.entries.insert(key, value);
-        Ok(())
+        self.apply(key, value)
     }
 
     fn delete(&mut self, key: &TableKey) -> SdbResult<()> {
-        self.entries.remove(key);
+        match key {
+            TableKey::Data(node_key) => {
+                self.nodes.remove(node_key);
+            }
+            TableKey::Child {
+                parent,
+                name,
+            } => {
+                if let Some(MemNode::Object(children)) = self.nodes.get_mut(parent) {
+                    children.remove(name);
+                }
+            }
+            TableKey::Index {
+                ..
+            } => {}
+        }
+
         Ok(())
     }
 }

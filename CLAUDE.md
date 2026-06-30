@@ -160,7 +160,7 @@ src/
 ├── value.rs                Value enum — dynamic Leaf/List/Node tree + get_value/set_value/subtree
 ├── codec/                  byte encoding (putters, reader)
 ├── engine/                 redb table defs, META_TABLE, TableKey (Data/Child/Index) / TableValue encoding
-│   └── backend.rs          ReadNodes/WriteNodes traits (redb table + in-memory MemNodes); packed-entity blob codec
+│   └── backend.rs          ReadNodes/WriteNodes traits (redb table + in-memory MemNodes, inline-object rep + alloc-free child_link); packed-entity blob codec
 ├── access/
 │   ├── reader.rs           ReadCursor + Reader trait (get_node, child_cached, object_keys…)
 │   ├── writer.rs           WriteCursor + Writer trait (put_node, ensure_container…)
