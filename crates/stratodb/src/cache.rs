@@ -8,7 +8,7 @@
 //! blob is immutable within a generation: any edit replaces the entity under a
 //! fresh key or rewrites it behind a generation bump.)
 
-use crate::{engine::MemNodes, path::SPath, SdbError, SdbResult, Skey};
+use crate::{engine::ArchivedNodes, path::SPath, SdbError, SdbResult, Skey};
 use lru::LruCache;
 use std::{num::NonZeroUsize, sync::Arc, sync::Mutex};
 
@@ -17,7 +17,7 @@ use std::{num::NonZeroUsize, sync::Arc, sync::Mutex};
 /// `(generation, Skey) -> MemNodes` decoded packed-entity blobs.
 pub(crate) struct PathCache {
     entries: Mutex<LruCache<(u64, SPath), Skey>>,
-    blobs:   Mutex<LruCache<(u64, Skey), Arc<MemNodes>>>,
+    blobs:   Mutex<LruCache<(u64, Skey), Arc<ArchivedNodes>>>,
 }
 
 impl PathCache {
@@ -39,7 +39,7 @@ impl PathCache {
     }
 
     /// Returns the cached decoded blob for `key` at `generation`, if present.
-    pub(crate) fn get_blob(&self, generation: u64, key: Skey) -> SdbResult<Option<Arc<MemNodes>>> {
+    pub(crate) fn get_blob(&self, generation: u64, key: Skey) -> SdbResult<Option<Arc<ArchivedNodes>>> {
         let blob = self
             .blobs
             .lock()
@@ -51,7 +51,7 @@ impl PathCache {
     }
 
     /// Records that `key` decodes to `blob` at `generation`.
-    pub(crate) fn put_blob(&self, generation: u64, key: Skey, blob: Arc<MemNodes>) -> SdbResult<()> {
+    pub(crate) fn put_blob(&self, generation: u64, key: Skey, blob: Arc<ArchivedNodes>) -> SdbResult<()> {
         self.blobs
             .lock()
             .map_err(|err| SdbError::CannotAccess(format!("blob cache mutex poisoned while putting: {err}")))?

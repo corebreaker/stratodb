@@ -10,7 +10,7 @@
 use super::Reader;
 use crate::{
     data::Scalar,
-    engine::MemNodes,
+    engine::ArchivedNodes,
     error::{SdbError, SdbResult},
     node::{Node, NodeKind},
     path::{SPath, Segment},
@@ -26,13 +26,13 @@ use std::sync::Arc;
 /// is held behind an `Arc` so it can be shared with (and served from) the blob
 /// cache without cloning the decoded table.
 pub(crate) struct MemReader {
-    nodes: Arc<MemNodes>,
+    nodes: Arc<ArchivedNodes>,
     root:  Skey,
     base:  SPath,
 }
 
 impl MemReader {
-    pub(crate) fn new(nodes: Arc<MemNodes>, root: Skey, base: SPath) -> Self {
+    pub(crate) fn new(nodes: Arc<ArchivedNodes>, root: Skey, base: SPath) -> Self {
         Self {
             nodes,
             root,

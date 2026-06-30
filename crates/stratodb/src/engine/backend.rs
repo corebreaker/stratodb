@@ -12,9 +12,12 @@
 //! just (de)serializing a `MemNodes` and the shredded tree logic is reused
 //! verbatim on both sides.
 
-use super::{TableKey, TableValue};
+use super::{
+    archived::{self, ArchNode, ArchTree, ArchivedNodes, NodeView},
+    TableKey,
+    TableValue,
+};
 use crate::{
-    codec::{self, Reader},
     data::Scalar,
     error::{SdbError, SdbResult},
     node::Node,
@@ -149,57 +152,67 @@ impl MemNodes {
             .unwrap_or(NodeKind::Object))
     }
 
-    /// Serializes the store into a packed-entity blob: the engine entry list —
-    /// each node a `Data` entry, plus a `Child` entry per object link.
-    pub(crate) fn to_blob(&self) -> Vec<u8> {
-        let count: usize = self
+    /// Serializes the store into a packed-entity blob: an rkyv-archived
+    /// [`ArchTree`] of `(key, node)` pairs sorted by key (children reference one
+    /// another by key, preserving node identity). Leaf scalars keep the byte codec.
+    pub(crate) fn to_blob(&self) -> SdbResult<Vec<u8>> {
+        let mut nodes: Vec<([u8; 16], ArchNode)> = self
             .nodes
-            .values()
-            .map(|node| {
-                1 + if let MemNode::Object(children) = node {
-                    children.len()
-                } else {
-                    0
-                }
+            .iter()
+            .map(|(key, node)| {
+                let arch = match node {
+                    // `children` is a `BTreeMap`, so the pairs come out name-sorted —
+                    // exactly what the read-side binary search over names relies on.
+                    MemNode::Object(children) => ArchNode::Object(
+                        children
+                            .iter()
+                            .map(|(name, child)| (name.clone(), child.into_bytes()))
+                            .collect(),
+                    ),
+                    MemNode::List(items) => ArchNode::List(items.iter().map(|child| child.into_bytes()).collect()),
+                    MemNode::Leaf(scalar) => {
+                        let mut bytes = Vec::new();
+                        scalar.encode(&mut bytes);
+                        ArchNode::Leaf(bytes)
+                    }
+                };
+
+                (key.into_bytes(), arch)
             })
-            .sum();
+            .collect();
 
-        let mut buf = Vec::new();
-        codec::put_u32(&mut buf, count as u32);
-
-        for (key, node) in &self.nodes {
-            codec::put_bytes(&mut buf, &TableKey::Data(*key).encode());
-            codec::put_bytes(&mut buf, &TableValue::Node(node.engine_node()).encode());
-
-            if let MemNode::Object(children) = node {
-                for (name, child) in children {
-                    let link = TableKey::Child {
-                        parent: *key,
-                        name:   name.clone(),
-                    };
-
-                    codec::put_bytes(&mut buf, &link.encode());
-                    codec::put_bytes(&mut buf, &TableValue::Skey(*child).encode());
-                }
-            }
+        // A never-written entity still archives a (root) empty object.
+        if nodes.is_empty() {
+            nodes.push((Skey::ROOT.into_bytes(), ArchNode::Object(Vec::new())));
         }
 
-        buf
+        // Sorted by key so the read side can binary-search nodes.
+        nodes.sort_by_key(|(key, _)| *key);
+
+        archived::to_bytes(&ArchTree {
+            nodes,
+        })
     }
 
-    /// Rebuilds a store from a blob written by [`to_blob`](Self::to_blob).
+    /// Rebuilds a mutable store from a blob (for in-place edits / unpacking),
+    /// preserving every node's key.
     pub(crate) fn from_blob(blob: &[u8]) -> SdbResult<MemNodes> {
-        let mut r = Reader::new(blob);
-        let count = r.u32()? as usize;
+        let arch = ArchivedNodes::new(blob)?;
 
-        let mut mem = MemNodes::default();
-        for _ in 0..count {
-            let key = TableKey::decode(r.bytes()?)?;
-            let value = TableValue::decode(r.bytes()?)?;
-            mem.apply(key, value)?;
+        let mut nodes = HashMap::new();
+        for (key, view) in arch.entries()? {
+            let node = match view {
+                NodeView::Object(pairs) => MemNode::Object(pairs.into_iter().collect()),
+                NodeView::List(items) => MemNode::List(items),
+                NodeView::Leaf(scalar) => MemNode::Leaf(scalar),
+            };
+
+            nodes.insert(key, node);
         }
 
-        Ok(mem)
+        Ok(MemNodes {
+            nodes,
+        })
     }
 
     /// Folds one decoded engine `(key, value)` entry into the inline rep.
@@ -259,7 +272,7 @@ impl MemNodes {
     pub(crate) fn into_packed(self) -> SdbResult<Node> {
         Ok(Node::Packed {
             root: self.root_kind()?,
-            blob: self.to_blob(),
+            blob: self.to_blob()?,
         })
     }
 

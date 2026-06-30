@@ -5,7 +5,7 @@ use crate::{
     access::{MemReader, ReadCursor, Reader, Rooted},
     cache::PathCache,
     data::{refs::SRef, SData, SValue, Scalar},
-    engine::{self, MemNodes, TableKey, TableValue},
+    engine::{self, ArchivedNodes, TableKey, TableValue},
     error::{SdbError, SdbResult},
     index::{registry, IndexId, Pattern},
     node::{Node, NodeKind},
@@ -186,7 +186,11 @@ impl ReadTxn {
 
     /// The decoded blob of the packed entity at `key`, served from (and populated
     /// into) the shared blob cache, or `None` if `key` is not a packed entity.
-    fn packed_mem(&self, table: &ReadOnlyTable<TableKey, TableValue>, key: Skey) -> SdbResult<Option<Arc<MemNodes>>> {
+    fn packed_mem(
+        &self,
+        table: &ReadOnlyTable<TableKey, TableValue>,
+        key: Skey,
+    ) -> SdbResult<Option<Arc<ArchivedNodes>>> {
         if let Some(mem) = self.cache.get_blob(self.generation, key)? {
             return Ok(Some(mem));
         }
@@ -195,7 +199,7 @@ impl ReadTxn {
             Some(Node::Packed {
                 blob, ..
             }) => {
-                let mem = Arc::new(MemNodes::from_blob(&blob)?);
+                let mem = Arc::new(ArchivedNodes::new(&blob)?);
                 self.cache.put_blob(self.generation, key, Arc::clone(&mem))?;
 
                 Ok(Some(mem))

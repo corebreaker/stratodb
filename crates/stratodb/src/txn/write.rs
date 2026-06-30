@@ -5,14 +5,14 @@ use crate::{
     access::{BoundCursor, MemReader, Reader, WriteCursor, Writer},
     data::{refs::SMut, SData, Scalar, SValue},
     db::DbInner,
-    engine::{self, MemNodes, TableKey, TableValue},
+    engine::{self, ArchivedNodes, MemNodes, TableKey, TableValue},
     error::{SdbError, SdbResult},
     index::{
         maintenance,
         registry::{self, IndexEntry},
         Pattern,
     },
-    node::NodeKind,
+    node::{Node, NodeKind},
     path::{IntoPath, SPath, Segment},
     tree::{self, Located},
     Skey,
@@ -324,19 +324,30 @@ impl WriteTxn {
                     entity,
                     rel,
                 } => {
-                    let mem = tree::decode_packed(&table, entity)?;
-                    let root = tree::resolve_from(&mem, Skey::ROOT, &rel)?;
+                    // A write transaction sees its own uncommitted blob; read it
+                    // archived (zero-copy) just like a committed read, without the
+                    // shared cache (which serves committed snapshots only).
+                    let arch = match tree::read_node(&table, entity)? {
+                        Some(Node::Packed {
+                            blob, ..
+                        }) => ArchivedNodes::new(&blob)?,
+                        _ => {
+                            return Err(SdbError::Corrupt(
+                                "locate reported a packed entity that is not packed".into(),
+                            ));
+                        }
+                    };
 
-                    Some((mem, root))
+                    let root = tree::resolve_from(&arch, Skey::ROOT, &rel)?;
+
+                    Some((arch, root))
                 }
                 _ => None,
             }
         };
 
         match packed {
-            // The blob cache is keyed by generation and serves committed reads; a
-            // write transaction sees its own uncommitted state, so it never caches.
-            Some((mem, Some(root))) => T::load(&MemReader::new(Arc::new(mem), root, SPath::root()), &SPath::root()),
+            Some((arch, Some(root))) => T::load(&MemReader::new(Arc::new(arch), root, SPath::root()), &SPath::root()),
             // Plain, absent, or an absent sub-path of a packed entity: the path
             // loader handles all three (including a field's `default` fallback).
             _ => T::load(&WriteCursor::new(self), base),
