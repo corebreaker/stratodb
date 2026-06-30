@@ -132,9 +132,11 @@ impl ReadTxn {
                 entity,
                 rel,
             } => {
-                let mem = tree::decode_packed(table, entity)?;
+                let mem = self
+                    .packed_mem(table, entity)?
+                    .ok_or_else(|| SdbError::Corrupt("locate reported a packed entity that is not packed".into()))?;
                 let root =
-                    tree::resolve_from(&mem, Skey::ROOT, &rel)?.ok_or_else(|| SdbError::PathNotFound(base.clone()))?;
+                    tree::resolve_from(&*mem, Skey::ROOT, &rel)?.ok_or_else(|| SdbError::PathNotFound(base.clone()))?;
 
                 Ok(A::open(
                     Arc::new(MemReader::new(mem, root, base.clone())),
@@ -155,15 +157,9 @@ impl ReadTxn {
         // entity) rather than descending into one — and reuses the shared path
         // cache instead of re-walking the tree on every load.
         if let Some(key) = self.lookup_path(base)? {
-            return match tree::read_node(table, key)? {
-                Some(Node::Packed {
-                    blob, ..
-                }) => {
-                    let mem = MemNodes::from_blob(&blob)?;
-
-                    T::load(&MemReader::new(mem, Skey::ROOT, SPath::root()), &SPath::root())
-                }
-                _ => T::load(&ReadCursor::new(self), base),
+            return match self.packed_mem(table, key)? {
+                Some(mem) => T::load(&MemReader::new(mem, Skey::ROOT, SPath::root()), &SPath::root()),
+                None => T::load(&ReadCursor::new(self), base),
             };
         }
 
@@ -176,8 +172,11 @@ impl ReadTxn {
                 entity,
                 rel,
             } => {
-                let mem = tree::decode_packed(table, entity)?;
-                match tree::resolve_from(&mem, Skey::ROOT, &rel)? {
+                let mem = self
+                    .packed_mem(table, entity)?
+                    .ok_or_else(|| SdbError::Corrupt("locate reported a packed entity that is not packed".into()))?;
+
+                match tree::resolve_from(&*mem, Skey::ROOT, &rel)? {
                     Some(root) => T::load(&MemReader::new(mem, root, SPath::root()), &SPath::root()),
                     None => T::load(&ReadCursor::new(self), base),
                 }
@@ -185,18 +184,32 @@ impl ReadTxn {
         }
     }
 
-    /// Recomposes the entity stored under `entity` as a `T`, decoding it in place
-    /// when it is packed and otherwise re-rooting a plain reader at its key.
-    fn load_entity<T: SData>(&self, table: &ReadOnlyTable<TableKey, TableValue>, entity: Skey) -> SdbResult<T> {
-        match tree::read_node(table, entity)? {
+    /// The decoded blob of the packed entity at `key`, served from (and populated
+    /// into) the shared blob cache, or `None` if `key` is not a packed entity.
+    fn packed_mem(&self, table: &ReadOnlyTable<TableKey, TableValue>, key: Skey) -> SdbResult<Option<Arc<MemNodes>>> {
+        if let Some(mem) = self.cache.get_blob(self.generation, key)? {
+            return Ok(Some(mem));
+        }
+
+        match tree::read_node(table, key)? {
             Some(Node::Packed {
                 blob, ..
             }) => {
-                let mem = MemNodes::from_blob(&blob)?;
+                let mem = Arc::new(MemNodes::from_blob(&blob)?);
+                self.cache.put_blob(self.generation, key, Arc::clone(&mem))?;
 
-                T::load(&MemReader::new(mem, Skey::ROOT, SPath::root()), &SPath::root())
+                Ok(Some(mem))
             }
-            _ => T::load(&Rooted::new(&ReadCursor::new(self), entity), &SPath::root()),
+            _ => Ok(None),
+        }
+    }
+
+    /// Recomposes the entity stored under `entity` as a `T`, decoding it (via the
+    /// blob cache) when it is packed and otherwise re-rooting a plain reader at it.
+    fn load_entity<T: SData>(&self, table: &ReadOnlyTable<TableKey, TableValue>, entity: Skey) -> SdbResult<T> {
+        match self.packed_mem(table, entity)? {
+            Some(mem) => T::load(&MemReader::new(mem, Skey::ROOT, SPath::root()), &SPath::root()),
+            None => T::load(&Rooted::new(&ReadCursor::new(self), entity), &SPath::root()),
         }
     }
 

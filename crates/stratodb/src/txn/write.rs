@@ -218,7 +218,9 @@ impl WriteTxn {
         };
 
         match packed {
-            Some((mem, Some(root))) => T::load(&MemReader::new(mem, root, SPath::root()), &SPath::root()),
+            // The blob cache is keyed by generation and serves committed reads; a
+            // write transaction sees its own uncommitted state, so it never caches.
+            Some((mem, Some(root))) => T::load(&MemReader::new(Arc::new(mem), root, SPath::root()), &SPath::root()),
             // Plain, absent, or an absent sub-path of a packed entity: the path
             // loader handles all three (including a field's `default` fallback).
             _ => T::load(&WriteCursor::new(self), base),

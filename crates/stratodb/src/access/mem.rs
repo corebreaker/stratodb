@@ -18,17 +18,21 @@ use crate::{
     Skey,
 };
 
+use std::sync::Arc;
+
 /// A reader over one decoded packed entity. `root` is the node the enclosing path
 /// resolved to inside the blob; `base` is that enclosing path, so the absolute
-/// paths an accessor builds (e.g. `xs[0]`) can be re-based onto `root`.
+/// paths an accessor builds (e.g. `xs[0]`) can be re-based onto `root`. The blob
+/// is held behind an `Arc` so it can be shared with (and served from) the blob
+/// cache without cloning the decoded table.
 pub(crate) struct MemReader {
-    nodes: MemNodes,
+    nodes: Arc<MemNodes>,
     root:  Skey,
     base:  SPath,
 }
 
 impl MemReader {
-    pub(crate) fn new(nodes: MemNodes, root: Skey, base: SPath) -> Self {
+    pub(crate) fn new(nodes: Arc<MemNodes>, root: Skey, base: SPath) -> Self {
         Self {
             nodes,
             root,
@@ -46,7 +50,7 @@ impl MemReader {
             return Ok(None);
         }
 
-        tree::resolve_from(&self.nodes, self.root, &SPath::from_segments(&segs[base.len()..]))
+        tree::resolve_from(&*self.nodes, self.root, &SPath::from_segments(&segs[base.len()..]))
     }
 }
 
@@ -56,11 +60,11 @@ impl Reader for MemReader {
     }
 
     fn child(&self, parent: Skey, seg: &Segment) -> SdbResult<Option<Skey>> {
-        tree::child_key(&self.nodes, parent, seg)
+        tree::child_key(&*self.nodes, parent, seg)
     }
 
     fn scalar(&self, key: Skey) -> SdbResult<Scalar> {
-        tree::scalar_at(&self.nodes, key)
+        tree::scalar_at(&*self.nodes, key)
     }
 
     fn scalar_at(&self, path: &SPath) -> SdbResult<Option<Scalar>> {
@@ -68,7 +72,7 @@ impl Reader for MemReader {
             return Ok(None);
         };
 
-        match tree::read_node(&self.nodes, key)? {
+        match tree::read_node(&*self.nodes, key)? {
             Some(Node::Leaf(scalar)) => Ok(Some(scalar)),
             Some(other) => Err(SdbError::UnexpectedNode {
                 path:     path.clone(),
@@ -80,14 +84,14 @@ impl Reader for MemReader {
     }
 
     fn kind(&self, key: Skey) -> SdbResult<Option<NodeKind>> {
-        tree::kind_of(&self.nodes, key)
+        tree::kind_of(&*self.nodes, key)
     }
 
     fn len(&self, key: Skey) -> SdbResult<usize> {
-        tree::list_len(&self.nodes, key)
+        tree::list_len(&*self.nodes, key)
     }
 
     fn object_keys(&self, key: Skey) -> SdbResult<Vec<String>> {
-        tree::object_keys(&self.nodes, key)
+        tree::object_keys(&*self.nodes, key)
     }
 }

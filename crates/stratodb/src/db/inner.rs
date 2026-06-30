@@ -12,6 +12,10 @@ use std::{
 /// Capacity (in entries) of each table's path-resolution cache.
 const PATH_CACHE_CAPACITY: usize = 256 * 1024;
 
+/// Capacity (in entries) of each table's decoded packed-blob cache. Smaller than
+/// the path cache: each entry holds a whole decoded entity, not a single key.
+const BLOB_CACHE_CAPACITY: usize = 64 * 1024;
+
 /// State shared by every [`StratoDb`] / [`Table`] handle on one database file.
 pub(crate) struct DbInner {
     db: Database,
@@ -51,7 +55,7 @@ impl DbInner {
                 SdbError::CannotAccess(msg)
             })?
             .entry(name.to_string())
-            .or_insert_with(|| Arc::new(PathCache::new(PATH_CACHE_CAPACITY)))
+            .or_insert_with(|| Arc::new(PathCache::new(PATH_CACHE_CAPACITY, BLOB_CACHE_CAPACITY)))
             .clone();
 
         Ok(cache)
