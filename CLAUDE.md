@@ -26,12 +26,13 @@ stratodb/
 │   │   ├── src/
 │   │   ├── tests/
 │   │   ├── examples/           runnable examples (basic.rs, indexed.rs)
+│   │   ├── benches/            criterion benches (common/ fixtures + one file per feature area)
 │   │   └── Cargo.toml
 │   └── stratodb-derive/        proc-macro crate (#[derive(SData)])
 │       └── src/
 ```
 
-The workspace is just the two crates (`members = ["crates/*"]`, no `exclude`). Examples live under `crates/stratodb/examples/` and are declared as `[[example]]` targets in `crates/stratodb/Cargo.toml` (`indexed` carries `required-features = ["derive"]`).
+The workspace is just the two crates (`members = ["crates/*"]`, no `exclude`). Examples live under `crates/stratodb/examples/` and are declared as `[[example]]` targets in `crates/stratodb/Cargo.toml` (`indexed` carries `required-features = ["derive"]`). Benches live under `crates/stratodb/benches/` and are declared as `[[bench]]` targets (`harness = false`, all `required-features = ["derive"]`); `benches/common/mod.rs` is a shared fixtures module (`mod common;` in each bench), not a target.
 
 ---
 
@@ -66,6 +67,15 @@ Examples:
 cargo run -p stratodb --example basic
 cargo run -p stratodb --example indexed --features derive
 ```
+
+Benches (criterion; require `derive` since they use a derived entity):
+
+```sh
+cargo bench -p stratodb --features derive               # all
+cargo bench -p stratodb --features derive --bench reads  # one category
+```
+
+Note: `cargo test --all-features --all-targets` (the gate's first line) compiles **and runs** the benches once each in criterion's test mode, so a broken bench fails the gate. Keep the fixture sizes (`benches/common`: `DATASET`, `RING`) modest enough that this stays fast.
 
 ---
 
@@ -234,22 +244,35 @@ Generated code is fully `::stratodb::`-qualified (no import assumptions; trait m
 
 ## Test suite
 
-| File | Feature gate | What it covers |
-|------|-------------|----------------|
-| `tests/foundation.rs` | — | put/get, node kinds, cascade delete, persist/reopen |
-| `tests/typed.rs` | — | hand-written SData + accessor contract (reference for derive output) |
-| `tests/containers.rs` | — | Vec/Option/BTreeMap/Bytes roundtrips + accessor API |
-| `tests/rooted.rs` | — | RootedRead/RootedWrite, relative paths, scoped index queries |
-| `tests/indexes.rs` | — | index registry, maintenance, query builder, unique enforcement, `ensure_index` (create-if-absent, no-op on present/divergent), `has_index`/`delete_index` (registry purge + physical entries, idempotent, other indexes & data intact, recreate, reopen) |
-| `tests/export.rs` | — | JSON/YAML export of stored subtrees (compact/pretty/block, scalar rendering, missing path, scalar & list roots) |
-| `tests/value.rs` | — | dynamic `Value`: `store_value`/`load_value` round-trips, `get_value`/`set_value`, `Value`'s own `JsonExporter`/`YamlExporter` |
-| `tests/derive.rs` | `derive` | #[derive(SData)]: structs/enums + every `#[strato(...)]` attr (rename/skip/default/with, from/into/try_from, enum reps, generics+bound, flatten) |
-| `tests/index_typed.rs` | `derive` | end-to-end derived indexes (back-fill, composite prefix, unique, reopen) + `ensure_indexes::<T>()` (creates missing, skips present, idempotent) + `delete_indexes::<T>()` (drops every declared index, returns the count, idempotent) |
+| File                     | Feature gate          | What it covers                                                                                                                                                                                                                                                       |
+|--------------------------|-----------------------|----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
+| `tests/foundation.rs`    | —                     | put/get, node kinds, cascade delete, persist/reopen                                                                                                                                                                                                                  |
+| `tests/typed.rs`         | —                     | hand-written SData + accessor contract (reference for derive output)                                                                                                                                                                                                 |
+| `tests/containers.rs`    | —                     | Vec/Option/BTreeMap/Bytes roundtrips + accessor API                                                                                                                                                                                                                  |
+| `tests/rooted.rs`        | —                     | RootedRead/RootedWrite, relative paths, scoped index queries                                                                                                                                                                                                         |
+| `tests/indexes.rs`       | —                     | index registry, maintenance, query builder, unique enforcement, `ensure_index` (create-if-absent, no-op on present/divergent), `has_index`/`delete_index` (registry purge + physical entries, idempotent, other indexes & data intact, recreate, reopen)             |
+| `tests/export.rs`        | —                     | JSON/YAML export of stored subtrees (compact/pretty/block, scalar rendering, missing path, scalar & list roots)                                                                                                                                                      |
+| `tests/value.rs`         | —                     | dynamic `Value`: `store_value`/`load_value` round-trips, `get_value`/`set_value`, `Value`'s own `JsonExporter`/`YamlExporter`                                                                                                                                        |
+| `tests/derive.rs`        | `derive`              | #[derive(SData)]: structs/enums + every `#[strato(...)]` attr (rename/skip/default/with, from/into/try_from, enum reps, generics+bound, flatten)                                                                                                                     |
+| `tests/index_typed.rs`   | `derive`              | end-to-end derived indexes (back-fill, composite prefix, unique, reopen) + `ensure_indexes::<T>()` (creates missing, skips present, idempotent) + `delete_indexes::<T>()` (drops every declared index, returns the count, idempotent)                                |
 | `tests/cross_feature.rs` | `derive` (+ `bignum`) | feature seams together: a derived+renamed entity with an enum field, indexed (unique + non-unique), exported to JSON/YAML, round-tripped through `Value`; a `#[cfg(feature = "bignum")]` module covers a BigInt index ordering by value and bignum scalars exporting |
 
 Big-number coverage lives in `src` unit tests, not a `tests/` file: `data/scalar.rs` (storage round-trips), `index/ordered.rs` (value ordering), and `data/bignum.rs` (as-data round-trips via an in-memory DB, gated on a `*-as-data`-only combo).
 
 The export writers also carry `src` unit tests: `export/scalar.rs` (each `Scalar`'s text form), `export/json.rs` / `export/yaml.rs` (layout + escaping on hand-built `Value`s), and `export/base64.rs` (RFC 4648 vectors).
+
+### Benchmark suite
+
+Criterion benches under `benches/` (all `required-features = ["derive"]`), one file per feature area, all sharing the `benches/common` fixtures (a `User` entity with one unique + one non-unique index; `populated()` and the `Ring` working set).
+
+| Bench              | What it measures                                                                                        |
+|--------------------|---------------------------------------------------------------------------------------------------------|
+| `reads.rs`         | scalar read, scalar read + presence test, full `load`, single field via the zero-copy accessor          |
+| `writes.rs`        | `store` a whole entity, `put` a single leaf                                                             |
+| `modifications.rs` | the three update paths — accessor in-place (zero-copy `SMut`), `put` by path, `SData` load/update/store |
+| `deletes.rs`       | cascading entity removal (un-indexed and indexed), via `iter_batched` so only the delete is timed       |
+| `indexes.rs`       | indexed `find`/reverse `query`, indexed store/update/remove maintenance, `create_index` back-fill       |
+| `dynamic_value.rs` | `Value` load/store, in-memory `get_value`/`set_value`, JSON (compact/pretty) + YAML export              |
 
 ---
 
@@ -257,14 +280,14 @@ The export writers also carry `src` unit tests: `export/scalar.rs` (each `Scalar
 
 ### COMPLETE
 
-| Milestone | Description |
-|-----------|-------------|
-| 1 | Foundation: StratoDb, Table, ReadTxn, WriteTxn, SPath, Skey, Node, tree walk, path cache |
-| 2 | SData trait + accessors: SValue/Scalar, Leaf/LeafMut, Vec/Option/BTreeMap/Bytes containers, #[derive(SData)] for structs and enums, StratoXxxDesc |
-| 3 | Secondary indexes: order-preserving codec, IndexDef + registry, maintenance, pattern matching, query builder, unique enforcement, #[strato(index(...))] derive attr, back-fill |
-| derive-attrs | Serde-style `#[strato(...)]` attributes — 7 phases (detailed below) |
-| bignum | Optional BigInt / BigFloat / BigRational as `Scalar`/`SValue`/`SData` + order-preserving index codecs (detailed below) |
-| export + Value | Hand-rolled (zero-dep) JSON/YAML export via the `JsonExporter`/`YamlExporter` traits + a dynamic `Value` document type with load/store and path get/set (detailed below) |
+| Milestone      | Description                                                                                                                                                                    |
+|----------------|--------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
+| 1              | Foundation: StratoDb, Table, ReadTxn, WriteTxn, SPath, Skey, Node, tree walk, path cache                                                                                       |
+| 2              | SData trait + accessors: SValue/Scalar, Leaf/LeafMut, Vec/Option/BTreeMap/Bytes containers, #[derive(SData)] for structs and enums, StratoXxxDesc                              |
+| 3              | Secondary indexes: order-preserving codec, IndexDef + registry, maintenance, pattern matching, query builder, unique enforcement, #[strato(index(...))] derive attr, back-fill |
+| derive-attrs   | Serde-style `#[strato(...)]` attributes — 7 phases (detailed below)                                                                                                            |
+| bignum         | Optional BigInt / BigFloat / BigRational as `Scalar`/`SValue`/`SData` + order-preserving index codecs (detailed below)                                                         |
+| export + Value | Hand-rolled (zero-dep) JSON/YAML export via the `JsonExporter`/`YamlExporter` traits + a dynamic `Value` document type with load/store and path get/set (detailed below)       |
 
 Milestone 3 extras (same branch): rooted views (`RootedRead`/`RootedWrite`), `SPath` normalization + `/` operator.
 
@@ -274,15 +297,15 @@ Serde-style `#[strato(...)]` attributes on `#[derive(SData)]` (namespace **`stra
 
 **Phases (all DONE, one tested commit each):**
 
-| Phase | Attributes |
-|-------|-----------|
-| 1 | `rename` / `rename_all` (8 Serde casings) / `alias` |
-| 2 | `skip` / `skip_store` / `skip_load` / `skip_store_if` / `default` |
-| 3 | `store_with` / `load_with` / `with` |
-| 4 | `from` / `into` / `try_from` (container-level: the type is stored AS a target `U`, accessors delegate to `U`'s; a failed `try_from` → `SdbError::Conversion`) |
-| 5 | enum reps: `tag` (internally) / `tag`+`content` (adjacently) / `untagged` / `other` catch-all; enum `rename_all`, variant `rename`/`alias`; `expecting` |
-| 6 | generics + `bound` (single override, not a load/store split — there is one `SData` impl) |
-| 7 | `flatten` |
+| Phase  | Attributes                                                                                                                                                    |
+|--------|---------------------------------------------------------------------------------------------------------------------------------------------------------------|
+| 1      | `rename` / `rename_all` (8 Serde casings) / `alias`                                                                                                           |
+| 2      | `skip` / `skip_store` / `skip_load` / `skip_store_if` / `default`                                                                                             |
+| 3      | `store_with` / `load_with` / `with`                                                                                                                           |
+| 4      | `from` / `into` / `try_from` (container-level: the type is stored AS a target `U`, accessors delegate to `U`'s; a failed `try_from` → `SdbError::Conversion`) |
+| 5      | enum reps: `tag` (internally) / `tag`+`content` (adjacently) / `untagged` / `other` catch-all; enum `rename_all`, variant `rename`/`alias`; `expecting`       |
+| 6      | generics + `bound` (single override, not a load/store split — there is one `SData` impl)                                                                      |
+| 7      | `flatten`                                                                                                                                                     |
 
 **Key implementation facts:**
 - Effective stored name = `rename` > `rename_all(ident)` > the Rust ident; it drives store/load, accessor child-navigation and `Desc::FIELDS`. Getter method names stay the Rust idents.
@@ -301,12 +324,12 @@ Serde-style `#[strato(...)]` attributes on `#[derive(SData)]` (namespace **`stra
 
 Optional support for `num_bigint::BigInt`, `num_bigfloat::BigFloat` (a fixed 40-digit **decimal** float), and `num_rational::BigRational`, behind a feature matrix (`default = []`). Each type has two orthogonal axes — **`-as-scalar`** (native `Scalar` variant + `SValue`) and **`-as-data`** (`SData` impl) — with umbrellas rolling them up:
 
-| Feature | Pulls in | Effect |
-|---------|----------|--------|
-| `bigint-as-scalar` / `bigfloat-as-scalar` / `rational-as-scalar` | the matching `num-*` crate | a `Scalar` variant + `SValue` impl |
-| `bigint-as-data` / `bigfloat-as-data` / `rational-as-data` | the matching `num-*` crate | an `SData` impl |
-| `bignum-as-scalar` / `bignum-as-data` | the three above, respectively | — |
-| `bignum` | both umbrellas | everything |
+| Feature                                                          | Pulls in                      | Effect                             |
+|------------------------------------------------------------------|-------------------------------|------------------------------------|
+| `bigint-as-scalar` / `bigfloat-as-scalar` / `rational-as-scalar` | the matching `num-*` crate    | a `Scalar` variant + `SValue` impl |
+| `bigint-as-data` / `bigfloat-as-data` / `rational-as-data`       | the matching `num-*` crate    | an `SData` impl                    |
+| `bignum-as-scalar` / `bignum-as-data`                            | the three above, respectively | —                                  |
+| `bignum`                                                         | both umbrellas                | everything                         |
 
 `rational-as-scalar` and `rational-as-data` also pull in `num-bigint` — a rational is (de)serialised through its `BigInt` numerator/denominator.
 
