@@ -1,24 +1,25 @@
-//! A read/write cursor bound to one already-open engine table and anchored at a
-//! node key.
+//! A read/write cursor bound to one node-store backend, anchored at a node key.
 //!
 //! A whole-value `store` decomposes into many per-field writes. Routed through the
 //! per-call [`WriteCursor`](super::WriteCursor), each one reopens the engine table,
 //! re-runs index maintenance and re-walks the path from the table root — costs
 //! that scale with the number of fields. [`BoundCursor`] removes all three: the
-//! caller opens the table once, brackets index maintenance once around the whole
+//! caller holds the backend once, brackets index maintenance once around the whole
 //! store, and resolves the entity's parent a single time; every field write then
-//! reuses that table handle and resolves **relative to the anchor** instead of the
-//! root.
+//! reuses that backend and resolves **relative to the anchor**.
 //!
-//! It is used only for the additive phase of [`store`](crate::txn::WriteTxn::store)
-//! / [`store_value`](crate::txn::WriteTxn::store_value), after the old subtree has
+//! It is generic over the backend ([`WriteNodes`]), so the same store/decompose
+//! logic builds a subtree both on the live engine table and inside an in-memory
+//! [`MemNodes`](crate::engine::MemNodes) that becomes a packed entity's blob.
+//!
+//! It is used only for the additive phase of a store, after the old subtree has
 //! been cleared, so it never participates in the shared path cache and does no
 //! index maintenance of its own.
 
 use super::{Reader, Writer};
 use crate::{
     data::Scalar,
-    engine::{TableKey, TableValue},
+    engine::WriteNodes,
     error::{SdbError, SdbResult},
     node::{Node, NodeKind},
     path::{SPath, Segment},
@@ -26,36 +27,32 @@ use crate::{
     Skey,
 };
 
-use redb::Table;
 use std::cell::RefCell;
 
-/// The writable engine table over StratoDB keys and values.
-type DataTable<'txn> = Table<'txn, TableKey, TableValue>;
-
-/// A cursor over a borrowed, already-open table whose paths resolve relative to
-/// `root`. The table is shared through a `RefCell` so each (read or write) method
-/// can borrow it for the length of one engine operation.
-pub(crate) struct BoundCursor<'a, 'b, 'txn> {
-    table: &'a RefCell<&'b mut DataTable<'txn>>,
-    root:  Skey,
+/// A cursor over a borrowed node-store backend whose paths resolve relative to
+/// `root`. The backend is shared through a `RefCell` so each (read or write)
+/// method can borrow it for the length of one operation.
+pub(crate) struct BoundCursor<'a, 'b, B: WriteNodes> {
+    backend: &'a RefCell<&'b mut B>,
+    root:    Skey,
 }
 
-impl<'a, 'b, 'txn> BoundCursor<'a, 'b, 'txn> {
-    pub(crate) fn new(table: &'a RefCell<&'b mut DataTable<'txn>>, root: Skey) -> Self {
+impl<'a, 'b, B: WriteNodes> BoundCursor<'a, 'b, B> {
+    pub(crate) fn new(backend: &'a RefCell<&'b mut B>, root: Skey) -> Self {
         Self {
-            table,
+            backend,
             root,
         }
     }
 }
 
-impl Reader for BoundCursor<'_, '_, '_> {
+impl<B: WriteNodes> Reader for BoundCursor<'_, '_, B> {
     fn resolve(&self, path: &SPath) -> SdbResult<Option<Skey>> {
-        tree::resolve_from(&**self.table.borrow(), self.root, path)
+        tree::resolve_from(&**self.backend.borrow(), self.root, path)
     }
 
     fn child(&self, parent: Skey, seg: &Segment) -> SdbResult<Option<Skey>> {
-        tree::child_key(&**self.table.borrow(), parent, seg)
+        tree::child_key(&**self.backend.borrow(), parent, seg)
     }
 
     // The bound cursor sees its own uncommitted writes, so — like the write
@@ -65,16 +62,16 @@ impl Reader for BoundCursor<'_, '_, '_> {
     }
 
     fn scalar(&self, key: Skey) -> SdbResult<Scalar> {
-        tree::scalar_at(&**self.table.borrow(), key)
+        tree::scalar_at(&**self.backend.borrow(), key)
     }
 
     fn scalar_at(&self, path: &SPath) -> SdbResult<Option<Scalar>> {
-        let table = self.table.borrow();
-        let Some(key) = tree::resolve_from(&**table, self.root, path)? else {
+        let backend = self.backend.borrow();
+        let Some(key) = tree::resolve_from(&**backend, self.root, path)? else {
             return Ok(None);
         };
 
-        match tree::read_node(&**table, key)? {
+        match tree::read_node(&**backend, key)? {
             Some(Node::Leaf(scalar)) => Ok(Some(scalar)),
             Some(other) => Err(SdbError::UnexpectedNode {
                 path:     path.clone(),
@@ -86,40 +83,40 @@ impl Reader for BoundCursor<'_, '_, '_> {
     }
 
     fn kind(&self, key: Skey) -> SdbResult<Option<NodeKind>> {
-        tree::kind_of(&**self.table.borrow(), key)
+        tree::kind_of(&**self.backend.borrow(), key)
     }
 
     fn len(&self, key: Skey) -> SdbResult<usize> {
-        tree::list_len(&**self.table.borrow(), key)
+        tree::list_len(&**self.backend.borrow(), key)
     }
 
     fn object_keys(&self, key: Skey) -> SdbResult<Vec<String>> {
-        tree::object_keys(&**self.table.borrow(), key)
+        tree::object_keys(&**self.backend.borrow(), key)
     }
 }
 
-impl Writer for BoundCursor<'_, '_, '_> {
+impl<B: WriteNodes> Writer for BoundCursor<'_, '_, B> {
     fn put_scalar(&self, path: &SPath, scalar: Scalar) -> SdbResult<()> {
-        tree::put_scalar_rel(&mut self.table.borrow_mut(), self.root, path, scalar)
+        tree::put_scalar_rel(&mut **self.backend.borrow_mut(), self.root, path, scalar)
     }
 
     fn remove(&self, path: &SPath) -> SdbResult<bool> {
-        tree::remove_rel(&mut self.table.borrow_mut(), self.root, path)
+        tree::remove_rel(&mut **self.backend.borrow_mut(), self.root, path)
     }
 
     fn ensure_container(&self, path: &SPath, list: bool) -> SdbResult<Skey> {
-        tree::ensure_container_rel(&mut self.table.borrow_mut(), self.root, path, list)
+        tree::ensure_container_rel(&mut **self.backend.borrow_mut(), self.root, path, list)
     }
 
     fn list_move(&self, list_key: Skey, from: usize, to: usize) -> SdbResult<()> {
-        tree::list_move(&mut self.table.borrow_mut(), list_key, from, to)
+        tree::list_move(&mut **self.backend.borrow_mut(), list_key, from, to)
     }
 
     fn list_swap(&self, list_key: Skey, i: usize, j: usize) -> SdbResult<()> {
-        tree::list_swap(&mut self.table.borrow_mut(), list_key, i, j)
+        tree::list_swap(&mut **self.backend.borrow_mut(), list_key, i, j)
     }
 
     fn clear_children(&self, _path: &SPath, key: Skey) -> SdbResult<()> {
-        tree::clear_children(&mut self.table.borrow_mut(), key)
+        tree::clear_children(&mut **self.backend.borrow_mut(), key)
     }
 }

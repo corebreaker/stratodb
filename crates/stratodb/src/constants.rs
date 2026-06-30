@@ -6,8 +6,11 @@ pub const METADATA_TABLE_NAME: &str = "$metadata";
 /// On-disk format version understood by this build.
 ///
 /// v2 stores an object's children as separate `(parent, name)` child-link entries
-/// instead of one inline map blob per object node (see [`crate::engine`]).
-pub const FORMAT_VERSION: u32 = 2;
+/// instead of one inline map blob per object node. v3 adds packed entities: a
+/// `store` whose subtree no index reaches into is written as a single packed value
+/// (a serialized mini node-table) rather than one engine entry per shredded node
+/// (see [`crate::engine`]).
+pub const FORMAT_VERSION: u32 = 3;
 
 /// A constant string key representing the metadata key for the format version.
 pub(crate) const META_FORMAT_VERSION_KEY: &str = "format_version";

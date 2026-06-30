@@ -74,6 +74,23 @@ impl Pattern {
         self.segs.len()
     }
 
+    /// Whether this pattern's matched entities lie *strictly below* `base` — i.e.
+    /// the pattern is deeper than `base` and its leading segments match `base`
+    /// (a `*` matches any segment). When true, the subtree at `base` contains
+    /// indexed entities that need their own identities, so `base` must not be
+    /// packed into one opaque blob.
+    pub(crate) fn covers_strictly_below(&self, base: &SPath) -> bool {
+        let base = base.segments();
+        if self.segs.len() <= base.len() {
+            return false;
+        }
+
+        base.iter().zip(&self.segs).all(|(seg, pat)| match pat {
+            PatternSeg::Star => true,
+            PatternSeg::Lit(lit) => lit == seg,
+        })
+    }
+
     /// Returns the keys of the entities this pattern matches that lie on the same
     /// root-to-node line as `scope` (the path a mutation touched). The walk is
     /// pruned to that line, so it touches only nodes the mutation could affect.

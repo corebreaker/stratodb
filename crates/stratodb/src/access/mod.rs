@@ -7,10 +7,11 @@
 //! node's primary key via `key()` (resolved eagerly when the accessor is built).
 
 mod bound;
+mod mem;
 mod reader;
 mod rooted;
 mod writer;
 
-pub(crate) use self::{bound::BoundCursor, reader::ReadCursor, rooted::Rooted, writer::WriteCursor};
+pub(crate) use self::{bound::BoundCursor, mem::MemReader, reader::ReadCursor, rooted::Rooted, writer::WriteCursor};
 
 pub use self::{reader::Reader, writer::Writer};

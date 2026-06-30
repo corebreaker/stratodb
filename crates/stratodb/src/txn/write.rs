@@ -2,18 +2,19 @@
 
 use super::rooted::RootedWrite;
 use crate::{
-    access::{BoundCursor, Reader, WriteCursor, Writer},
+    access::{BoundCursor, MemReader, Reader, WriteCursor, Writer},
     data::{refs::SMut, SData, Scalar, SValue},
     db::DbInner,
-    engine::{self, TableKey, TableValue},
+    engine::{self, MemNodes, TableKey, TableValue},
     error::{SdbError, SdbResult},
     index::{
         maintenance,
         registry::{self, IndexEntry},
+        Pattern,
     },
     node::NodeKind,
     path::{IntoPath, SPath, Segment},
-    tree,
+    tree::{self, Located},
     Skey,
 };
 
@@ -107,9 +108,29 @@ impl WriteTxn {
             return value.store(&cursor, base);
         };
 
-        // One index-maintenance bracket and one open table handle for the whole
-        // entity: clear the old subtree, resolve the entity's parent once, then let
-        // every field write resolve relative to that anchor instead of the root.
+        if self.should_pack(base)? {
+            // Pack: build the whole entity subtree in memory, then write it as a
+            // single engine value. The decomposition is the very same `SData::store`
+            // logic, just driven over an in-memory mini node-table.
+            let mut mem = MemNodes::new();
+            {
+                let cell = RefCell::new(&mut mem);
+                value.store(&BoundCursor::new(&cell, Skey::ROOT), &SPath::root())?;
+            }
+
+            let node = mem.into_packed()?;
+            let last = last.clone();
+
+            return self.reindex_around(base, move |table| {
+                tree::remove_path(table, base)?;
+                tree::store_packed(table, &parent_path, &last, node)
+            });
+        }
+
+        // Unpacked (an index reaches into this subtree, so its children need their
+        // own keys): one index-maintenance bracket and one table handle for the
+        // whole entity — clear the old subtree, resolve the entity's parent once,
+        // then let every field write resolve relative to that anchor.
         let rel = segment_path(last);
         self.reindex_around(base, |table| {
             tree::remove_path(table, base)?;
@@ -118,6 +139,19 @@ impl WriteTxn {
             let cell = RefCell::new(table);
             value.store(&BoundCursor::new(&cell, anchor), &rel)
         })
+    }
+
+    /// Whether the subtree stored at `base` may be packed into one engine value:
+    /// it may, unless some index pattern matches entities *strictly below* `base`
+    /// (those need their own keys, so the subtree must stay shredded).
+    pub(crate) fn should_pack(&self, base: &SPath) -> SdbResult<bool> {
+        for entry in self.indexes()? {
+            if Pattern::parse(entry.def().pattern())?.covers_strictly_below(base) {
+                return Ok(false);
+            }
+        }
+
+        Ok(true)
     }
 
     pub(crate) fn get_at<V: SValue>(&self, path: &SPath) -> SdbResult<Option<V>> {
@@ -136,6 +170,11 @@ impl WriteTxn {
     }
 
     pub(crate) fn fetch_mut_at<'t, A: SMut<'t>>(&'t self, base: &SPath) -> SdbResult<A> {
+        // A write accessor navigates and mutates by node key, which a packed entity
+        // has only inside its blob. Spill the enclosing entity back into the live
+        // table first, so the accessor works against ordinary shredded nodes.
+        self.unpack_if_packed(base)?;
+
         let cursor = WriteCursor::new(self);
         let key = cursor
             .resolve(base)?
@@ -144,8 +183,46 @@ impl WriteTxn {
         Ok(A::open(Arc::new(cursor), base.clone(), key))
     }
 
+    /// If `base` lands at or inside a packed entity, unpacks that entity in place
+    /// so subsequent key-addressed access sees plain nodes.
+    fn unpack_if_packed(&self, base: &SPath) -> SdbResult<()> {
+        let mut table = self.txn.open_table(engine::data_def(&self.table))?;
+        if let Located::Packed {
+            entity, ..
+        } = tree::locate(&table, base)?
+        {
+            tree::unpack_entity(&mut table, entity)?;
+        }
+
+        Ok(())
+    }
+
     pub(crate) fn load_at<T: SData>(&self, base: &SPath) -> SdbResult<T> {
-        T::load(&WriteCursor::new(self), base)
+        // If `base` is at/inside a packed entity, decode it and recompose from the
+        // blob. The table handle is dropped before any `WriteCursor` use, since a
+        // write transaction allows only one open handle on the table at a time.
+        let packed = {
+            let table = self.txn.open_table(engine::data_def(&self.table))?;
+            match tree::locate(&table, base)? {
+                Located::Packed {
+                    entity,
+                    rel,
+                } => {
+                    let mem = tree::decode_packed(&table, entity)?;
+                    let root = tree::resolve_from(&mem, Skey::ROOT, &rel)?;
+
+                    Some((mem, root))
+                }
+                _ => None,
+            }
+        };
+
+        match packed {
+            Some((mem, Some(root))) => T::load(&MemReader::new(mem, root, SPath::root()), &SPath::root()),
+            // Plain, absent, or an absent sub-path of a packed entity: the path
+            // loader handles all three (including a field's `default` fallback).
+            _ => T::load(&WriteCursor::new(self), base),
+        }
     }
 
     /// Commits the transaction, making its changes durable and bumping the
@@ -260,7 +337,19 @@ impl WriteTxn {
     }
 
     pub(crate) fn put_scalar_path(&self, path: &SPath, scalar: Scalar) -> SdbResult<()> {
-        self.reindex_around(path, |table| tree::put_scalar(table, path, scalar))
+        self.reindex_around(path, |table| match tree::locate(table, path)? {
+            // The path descends into a packed entity: read-modify-write its blob.
+            Located::Packed {
+                entity,
+                rel,
+            } => {
+                let mut mem = tree::decode_packed(table, entity)?;
+                tree::put_scalar_rel(&mut mem, Skey::ROOT, &rel, scalar)?;
+
+                tree::write_packed(table, entity, mem.into_packed()?)
+            }
+            _ => tree::put_scalar(table, path, scalar),
+        })
     }
 
     pub(crate) fn ensure_container_at(&self, path: &SPath, list: bool) -> SdbResult<Skey> {
@@ -286,7 +375,23 @@ impl WriteTxn {
     }
 
     pub(crate) fn remove_path_at(&self, path: &SPath) -> SdbResult<bool> {
-        self.reindex_around(path, |table| tree::remove_path(table, path))
+        self.reindex_around(path, |table| match tree::locate(table, path)? {
+            // Removing *inside* a packed entity edits its blob; removing the entity
+            // itself (empty `rel`) falls through to the plain single-entry delete.
+            Located::Packed {
+                entity,
+                rel,
+            } if !rel.is_empty() => {
+                let mut mem = tree::decode_packed(table, entity)?;
+                let removed = tree::remove_rel(&mut mem, Skey::ROOT, &rel)?;
+                if removed {
+                    tree::write_packed(table, entity, mem.into_packed()?)?;
+                }
+
+                Ok(removed)
+            }
+            _ => tree::remove_path(table, path),
+        })
     }
 }
 

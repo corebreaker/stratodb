@@ -96,6 +96,14 @@ impl SPath {
         }
     }
 
+    /// Builds a path from a slice of segments (used to carry the remainder of a
+    /// path that descends into a packed entity).
+    pub(crate) fn from_segments(segments: &[Segment]) -> Self {
+        SPath {
+            segments: segments.to_vec(),
+        }
+    }
+
     /// The parent path, or `None` for the root.
     pub fn parent(&self) -> Option<SPath> {
         if self.segments.is_empty() {

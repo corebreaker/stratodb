@@ -9,6 +9,7 @@
 //! entries. The leading discriminant of [`TableKey`] partitions the key space
 //! into contiguous `Data` and index ranges.
 
+mod backend;
 mod errors;
 mod functions;
 mod table_defs;
@@ -16,6 +17,7 @@ mod table_key;
 mod table_value;
 
 pub(crate) use self::{
+    backend::{MemNodes, ReadNodes, WriteNodes},
     table_defs::META_TABLE,
     table_key::TableKey,
     table_value::TableValue,

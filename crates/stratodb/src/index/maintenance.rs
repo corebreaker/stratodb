@@ -159,12 +159,7 @@ fn index_key<T: ReadableTable<TableKey, TableValue>>(
 }
 
 /// The scalar at `column` relative to `entity`, or `Null` when the path is absent
-/// or does not land on a leaf.
+/// or does not land on a leaf. Descends transparently into a packed entity's blob.
 fn column_scalar<T: ReadableTable<TableKey, TableValue>>(t: &T, entity: Skey, column: &SPath) -> SdbResult<Scalar> {
-    let scalar = match tree::resolve_from(t, entity, column)? {
-        Some(key) => tree::leaf_scalar_opt(t, key)?.unwrap_or(Scalar::Null),
-        None => Scalar::Null,
-    };
-
-    Ok(scalar)
+    Ok(tree::entity_leaf(t, entity, column)?.unwrap_or(Scalar::Null))
 }

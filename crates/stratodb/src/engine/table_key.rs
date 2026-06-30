@@ -56,7 +56,26 @@ pub(crate) enum TableKey {
 }
 
 impl TableKey {
-    fn encode(&self) -> Vec<u8> {
+    /// The leading discriminant byte — the first thing the encoding emits and the
+    /// primary sort key (so `Data` < `Child` < index entries).
+    fn tag(&self) -> u8 {
+        match self {
+            TableKey::Data(_) => tag::DATA,
+            TableKey::Child {
+                ..
+            } => tag::CHILD,
+            TableKey::Index {
+                entity: Some(_), ..
+            } => tag::INDEX_DUP,
+            TableKey::Index {
+                entity: None, ..
+            } => tag::INDEX_UNIQUE,
+        }
+    }
+
+    /// The order-preserving byte encoding (also the engine key). Exposed within
+    /// the crate so the in-memory node backend can key on the same bytes redb does.
+    pub(crate) fn encode(&self) -> Vec<u8> {
         let mut buf = Vec::new();
         match self {
             TableKey::Data(skey) => {
@@ -94,7 +113,7 @@ impl TableKey {
         buf
     }
 
-    fn decode(data: &[u8]) -> SdbResult<TableKey> {
+    pub(crate) fn decode(data: &[u8]) -> SdbResult<TableKey> {
         let (&tag, rest) = data
             .split_first()
             .ok_or_else(|| SdbError::Corrupt("empty table key".into()))?;
@@ -201,6 +220,55 @@ impl RedbKey for TableKey {
         // The encoding is order-preserving by construction, so a bytewise
         // comparison yields the intended total order.
         data1.cmp(data2)
+    }
+}
+
+// Ordering by the order-preserving encoding, matching `RedbKey::compare`, so an
+// in-memory `BTreeMap<TableKey, _>` orders keys exactly as the engine does — but
+// computed directly from the fields, never allocating an encoding (this is on the
+// hot path of every packed-entity decode and navigation).
+impl Ord for TableKey {
+    fn cmp(&self, other: &Self) -> Ordering {
+        // Leading discriminant first: Data(0) < Child(1) < INDEX_DUP(2) < INDEX_UNIQUE(3).
+        self.tag().cmp(&other.tag()).then_with(|| match (self, other) {
+            (TableKey::Data(a), TableKey::Data(b)) => a.into_bytes().cmp(&b.into_bytes()),
+            (
+                TableKey::Child {
+                    parent: pa,
+                    name: na,
+                },
+                TableKey::Child {
+                    parent: pb,
+                    name: nb,
+                },
+            ) => pa
+                .into_bytes()
+                .cmp(&pb.into_bytes())
+                .then_with(|| na.as_bytes().cmp(nb.as_bytes())),
+            (
+                TableKey::Index {
+                    id: ia,
+                    cols: ca,
+                    entity: ea,
+                },
+                TableKey::Index {
+                    id: ib,
+                    cols: cb,
+                    entity: eb,
+                },
+            ) => ia.0.cmp(&ib.0).then_with(|| ca.cmp(cb)).then_with(|| match (ea, eb) {
+                (Some(x), Some(y)) => x.into_bytes().cmp(&y.into_bytes()),
+                _ => Ordering::Equal,
+            }),
+            // Equal tags imply the same variant (the tag distinguishes them).
+            _ => Ordering::Equal,
+        })
+    }
+}
+
+impl PartialOrd for TableKey {
+    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
+        Some(self.cmp(other))
     }
 }
 

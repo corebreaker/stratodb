@@ -31,7 +31,7 @@ pub(crate) enum TableValue {
 }
 
 impl TableValue {
-    fn encode(&self) -> Vec<u8> {
+    pub(crate) fn encode(&self) -> Vec<u8> {
         let mut buf = Vec::new();
         match self {
             TableValue::Node(node) => {
@@ -48,7 +48,7 @@ impl TableValue {
         buf
     }
 
-    fn decode(data: &[u8]) -> SdbResult<TableValue> {
+    pub(crate) fn decode(data: &[u8]) -> SdbResult<TableValue> {
         let mut r = Reader::new(data);
         let value = match r.u8()? {
             tag::NODE => TableValue::Node(Node::decode(&mut r)?),

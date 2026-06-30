@@ -2,15 +2,15 @@
 
 use super::{query::IndexQuery, rooted::RootedRead};
 use crate::{
-    access::{ReadCursor, Reader, Rooted},
+    access::{MemReader, ReadCursor, Reader, Rooted},
     cache::PathCache,
     data::{refs::SRef, SData, SValue, Scalar},
-    engine::{self, TableKey, TableValue},
+    engine::{self, MemNodes, TableKey, TableValue},
     error::{SdbError, SdbResult},
     index::{registry, IndexId, Pattern},
     node::{Node, NodeKind},
     path::{IntoPath, SPath, Segment},
-    tree,
+    tree::{self, Located},
     Skey,
 };
 
@@ -107,24 +107,97 @@ impl ReadTxn {
     }
 
     pub(crate) fn kind_at(&self, path: &SPath) -> SdbResult<Option<NodeKind>> {
-        let Some(key) = self.lookup_path(path)? else {
-            return Ok(None);
-        };
-
-        self.lookup_kind(key)
+        match self.open()? {
+            Some(table) => tree::kind(table, path),
+            None => Ok(None),
+        }
     }
 
     pub(crate) fn fetch_at<'t, A: SRef<'t>>(&'t self, base: &SPath) -> SdbResult<A> {
-        let cursor = ReadCursor::new(self);
-        let key = cursor
-            .resolve(base)?
-            .ok_or_else(|| SdbError::PathNotFound(base.clone()))?;
+        let Some(table) = self.open()? else {
+            return Err(SdbError::PathNotFound(base.clone()));
+        };
 
-        Ok(A::open(Arc::new(cursor), base.clone(), key))
+        match tree::locate(table, base)? {
+            Located::Missing => Err(SdbError::PathNotFound(base.clone())),
+            Located::Plain(_) => {
+                let cursor = ReadCursor::new(self);
+                let key = cursor
+                    .resolve(base)?
+                    .ok_or_else(|| SdbError::PathNotFound(base.clone()))?;
+
+                Ok(A::open(Arc::new(cursor), base.clone(), key))
+            }
+            Located::Packed {
+                entity,
+                rel,
+            } => {
+                let mem = tree::decode_packed(table, entity)?;
+                let root =
+                    tree::resolve_from(&mem, Skey::ROOT, &rel)?.ok_or_else(|| SdbError::PathNotFound(base.clone()))?;
+
+                Ok(A::open(
+                    Arc::new(MemReader::new(mem, root, base.clone())),
+                    base.clone(),
+                    root,
+                ))
+            }
+        }
     }
 
     pub(crate) fn load_at<T: SData>(&self, base: &SPath) -> SdbResult<T> {
-        T::load(&ReadCursor::new(self), base)
+        let Some(table) = self.open()? else {
+            return Err(SdbError::PathNotFound(base.clone()));
+        };
+
+        // Fast path: a cached resolution of `base` to a node key. This covers the
+        // common whole-entity load — `base` lands on a node (plain or a packed
+        // entity) rather than descending into one — and reuses the shared path
+        // cache instead of re-walking the tree on every load.
+        if let Some(key) = self.lookup_path(base)? {
+            return match tree::read_node(table, key)? {
+                Some(Node::Packed {
+                    blob, ..
+                }) => {
+                    let mem = MemNodes::from_blob(&blob)?;
+
+                    T::load(&MemReader::new(mem, Skey::ROOT, SPath::root()), &SPath::root())
+                }
+                _ => T::load(&ReadCursor::new(self), base),
+            };
+        }
+
+        // `base` did not resolve directly: it is either inside a packed entity (the
+        // walk stops at the entity) or genuinely absent.
+        match tree::locate(table, base)? {
+            // Absent: the path loader applies any field `default` fallback.
+            Located::Missing | Located::Plain(_) => T::load(&ReadCursor::new(self), base),
+            Located::Packed {
+                entity,
+                rel,
+            } => {
+                let mem = tree::decode_packed(table, entity)?;
+                match tree::resolve_from(&mem, Skey::ROOT, &rel)? {
+                    Some(root) => T::load(&MemReader::new(mem, root, SPath::root()), &SPath::root()),
+                    None => T::load(&ReadCursor::new(self), base),
+                }
+            }
+        }
+    }
+
+    /// Recomposes the entity stored under `entity` as a `T`, decoding it in place
+    /// when it is packed and otherwise re-rooting a plain reader at its key.
+    fn load_entity<T: SData>(&self, table: &ReadOnlyTable<TableKey, TableValue>, entity: Skey) -> SdbResult<T> {
+        match tree::read_node(table, entity)? {
+            Some(Node::Packed {
+                blob, ..
+            }) => {
+                let mem = MemNodes::from_blob(&blob)?;
+
+                T::load(&MemReader::new(mem, Skey::ROOT, SPath::root()), &SPath::root())
+            }
+            _ => T::load(&Rooted::new(&ReadCursor::new(self), entity), &SPath::root()),
+        }
     }
 
     /// Finds the entities an index points at, recomposing each as a `T`.
@@ -207,12 +280,11 @@ impl ReadTxn {
             entities.reverse();
         }
 
-        // Each match is addressed by its (stable) key; re-root a reader there so
-        // the path-based loader recomposes the entity from its own subtree.
-        let cursor = ReadCursor::new(self);
+        // Each match is addressed by its (stable) key; recompose it from its own
+        // subtree, decoding the blob in place when the entity is packed.
         entities
             .into_iter()
-            .map(|entity| T::load(&Rooted::new(&cursor, entity), &SPath::root()))
+            .map(|entity| self.load_entity::<T>(table, entity))
             .collect()
     }
 
@@ -239,21 +311,9 @@ impl ReadTxn {
     /// Reads the scalar at `path` (resolving through the cache); errors if the node
     /// there is not a leaf.
     fn scalar_at_path(&self, path: &SPath) -> SdbResult<Option<Scalar>> {
-        let Some(key) = self.lookup_path(path)? else {
-            return Ok(None);
-        };
-        let Some(table) = self.open()? else {
-            return Ok(None);
-        };
-
-        match tree::read_node(table, key)? {
-            Some(Node::Leaf(scalar)) => Ok(Some(scalar)),
-            Some(other) => Err(SdbError::UnexpectedNode {
-                path:     path.clone(),
-                expected: "leaf",
-                found:    other.kind().as_str(),
-            }),
-            None => Err(SdbError::Corrupt("path resolves to a missing node".into())),
+        match self.open()? {
+            Some(table) => tree::get_scalar(table, path),
+            None => Ok(None),
         }
     }
 

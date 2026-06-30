@@ -8,16 +8,15 @@
 use super::{read::ReadTxn, write::WriteTxn, write::segment_path};
 use crate::{
     access::{BoundCursor, WriteCursor, Writer},
-    engine::{TableKey, TableValue},
+    engine::{MemNodes, ReadNodes},
     error::{SdbError, SdbResult},
     node::Node,
     path::{IntoPath, SPath, Segment},
-    tree,
+    tree::{self, Located},
     Skey,
     Value,
 };
 
-use redb::ReadableTable;
 use std::{cell::RefCell, collections::BTreeMap};
 
 impl ReadTxn {
@@ -35,9 +34,19 @@ impl ReadTxn {
             return Ok(None);
         };
 
-        match tree::resolve(table, base)? {
-            Some(key) => Ok(Some(value_at(table, key)?)),
-            None => Ok(None),
+        match tree::locate(table, base)? {
+            Located::Missing => Ok(None),
+            Located::Plain(key) => Ok(Some(value_at(table, key)?)),
+            Located::Packed {
+                entity,
+                rel,
+            } => {
+                let mem = tree::decode_packed(table, entity)?;
+                match tree::resolve_from(&mem, Skey::ROOT, &rel)? {
+                    Some(key) => Ok(Some(value_at(&mem, key)?)),
+                    None => Ok(None),
+                }
+            }
         }
     }
 }
@@ -58,6 +67,25 @@ impl WriteTxn {
             return write_value(&cursor, value, &base);
         };
 
+        if self.should_pack(&base)? {
+            // Pack the whole subtree into one engine value (same rule and shape as
+            // the typed `store`).
+            let mut mem = MemNodes::new();
+            {
+                let cell = RefCell::new(&mut mem);
+                write_value(&BoundCursor::new(&cell, Skey::ROOT), value, &SPath::root())?;
+            }
+
+            let node = mem.into_packed()?;
+            let last = last.clone();
+            let target = base.clone();
+
+            return self.reindex_around(&base, move |table| {
+                tree::remove_path(table, &target)?;
+                tree::store_packed(table, &parent_path, &last, node)
+            });
+        }
+
         // One index-maintenance bracket and one table handle for the whole subtree,
         // exactly like the typed `store`: see [`WriteTxn::store`].
         let rel = segment_path(last);
@@ -73,24 +101,32 @@ impl WriteTxn {
 
 /// Reads the node at `key` and converts its subtree into a [`Value`]. A dangling
 /// child key is corruption — every key held by a container must resolve to a node.
-fn value_at<T: ReadableTable<TableKey, TableValue>>(table: &T, key: Skey) -> SdbResult<Value> {
-    let value = match tree::read_node(table, key)? {
+/// A packed entity is decoded once and its mini node-table walked the same way.
+fn value_at<B: ReadNodes>(b: &B, key: Skey) -> SdbResult<Value> {
+    let value = match tree::read_node(b, key)? {
         Some(Node::Leaf(scalar)) => Value::Leaf(scalar),
         Some(Node::List(items)) => {
             let mut out = Vec::with_capacity(items.len());
             for child in items {
-                out.push(value_at(table, child)?);
+                out.push(value_at(b, child)?);
             }
 
             Value::List(out)
         }
         Some(Node::Object) => {
             let mut out = BTreeMap::new();
-            for (name, child) in tree::object_children(table, key)? {
-                out.insert(name, value_at(table, child)?);
+            for (name, child) in tree::object_children(b, key)? {
+                out.insert(name, value_at(b, child)?);
             }
 
             Value::Node(out)
+        }
+        Some(Node::Packed {
+            blob, ..
+        }) => {
+            let mem = MemNodes::from_blob(&blob)?;
+
+            value_at(&mem, Skey::ROOT)?
         }
         None => {
             return Err(SdbError::Corrupt(

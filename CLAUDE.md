@@ -118,7 +118,9 @@ These choices are final and must not be revisited or worked around:
 
 **Storage model — full shredding.** Every scalar value is its own node with its own `Skey`. Paths are never persisted; they resolve by walking the tree from the fixed root key (`Skey::ROOT` = nil UUID). One redb file per `StratoDb`; one engine table per StratoDB table holds data nodes, **object child links** and index entries (partitioned by a leading discriminant byte — `Data` < `Child` < index). A global reserved `$metadata` table holds the index registry and the format version (now **`2`**).
 
-**Node types:** `Object`, `List(Vec<Skey>)`, `Leaf(Scalar)`. Identity is `Skey` (stable through moves and renames). An object node is a **marker** — it carries no inline child map. Its `(name → child key)` links live as separate `TableKey::Child { parent, name } → Skey` entries, so attaching/detaching/looking up one child is a single engine op (point lookup or one insert/remove) and a parent's whole child set is one forward range scan. This replaced the original `Object(BTreeMap<name, Skey>)` blob, whose rewrite-the-whole-map-per-child cost made a wide object O(N) per write and a bulk fill O(N²). A list still holds its element keys inline (`Vec<Skey>`): order is positional and lists are not the wide-fan-out case. **Format `1 → 2`**: the on-disk layout changed with this; `FORMAT_VERSION` was bumped and there is no migration (pre-release).
+**Node types:** `Object`, `List(Vec<Skey>)`, `Leaf(Scalar)`, `Packed { root, blob }`. Identity is `Skey` (stable through moves and renames). An object node is a **marker** — it carries no inline child map. Its `(name → child key)` links live as separate `TableKey::Child { parent, name } → Skey` entries, so attaching/detaching/looking up one child is a single engine op (point lookup or one insert/remove) and a parent's whole child set is one forward range scan. This replaced the original `Object(BTreeMap<name, Skey>)` blob, whose rewrite-the-whole-map-per-child cost made a wide object O(N) per write and a bulk fill O(N²). A list still holds its element keys inline (`Vec<Skey>`): order is positional and lists are not the wide-fan-out case.
+
+**Packed entities (the perf-critical path).** A `store` / `store_value` at a path whose subtree **no index pattern reaches into** writes the whole entity as **one** `Node::Packed` engine value — a serialized *mini node-table* (the entity's own `Data`/`Child` entries, see `engine/backend.rs`). One `store` is one write and one `load` is one read + decode, instead of one engine op per shredded node. A path that descends *into* a packed entity (a sub-`get`/`put`/`fetch`, an index column read) decodes the blob into an in-memory [`MemNodes`] and runs the **same** `tree::*` logic over it (the node model is reused verbatim — every operation is generic over a `ReadNodes`/`WriteNodes` backend that both redb and `MemNodes` implement). A `put`/`remove` into a packed entity read-modify-writes its blob; a `fetch_mut` first *unpacks* it (spills it back to shredded nodes), since a write accessor addresses by node key. **Packing rule:** `WriteTxn::should_pack(base)` packs unless some index `Pattern::covers_strictly_below(base)` — those children need their own keys, so that subtree stays shredded (and indexes over collection children keep working). **Format `2 → 3`** for the packed value; no migration (pre-release). This narrows the gap to a single-blob store (redb/bincode) to ~1.7-5× on most ops (it does not beat it: the blob is still a node-tree decoded/navigated in memory, not a flat struct), down from the original 8-5530×.
 
 **Per-table LRU path cache.** A `PathCache` (256 k entries, `lru` crate) keyed by `(generation, SPath)` is shared across read transactions on the same table. A `version_lock` + atomic generation counter ensure a snapshot never borrows a resolution from another committed version. `WriteTxn` never uses the cache (it sees uncommitted state); `ReadCursor` is cache-backed, `WriteCursor` uses raw walks.
 
@@ -150,14 +152,16 @@ src/
 ├── key.rs                  Skey (opaque 16-byte UUIDv7 primary key)
 ├── node/                   NodeKind (kind.rs) + Node Object(marker)/List/Leaf + encoding (definition.rs)
 ├── table.rs                Table handle → read()/write()/create_index(es)/ensure_index(es)/index_def/has_index/delete_index(es)
-├── tree.rs                 tree walk, node resolution, list helpers
+├── tree.rs                 tree walk, node resolution, list helpers (generic over a node backend); locate (plain vs packed), pack/unpack
 ├── value.rs                Value enum — dynamic Leaf/List/Node tree + get_value/set_value/subtree
 ├── codec/                  byte encoding (putters, reader)
 ├── engine/                 redb table defs, META_TABLE, TableKey (Data/Child/Index) / TableValue encoding
+│   └── backend.rs          ReadNodes/WriteNodes traits (redb table + in-memory MemNodes); packed-entity blob codec
 ├── access/
 │   ├── reader.rs           ReadCursor + Reader trait (get_node, child_cached, object_keys…)
 │   ├── writer.rs           WriteCursor + Writer trait (put_node, ensure_container…)
-│   ├── bound.rs            BoundCursor (Reader/Writer over one open table, anchored at an entity key — batched store)
+│   ├── bound.rs            BoundCursor<B> (Reader/Writer over one backend, anchored at a key — batched/packed store)
+│   ├── mem.rs              MemReader (Reader over a decoded packed entity's MemNodes, re-based at the accessor path)
 │   └── rooted.rs           Rooted<R> adapter (re-roots SData::load at an entity key)
 ├── data/
 │   ├── definition.rs       SData trait (store/load)
