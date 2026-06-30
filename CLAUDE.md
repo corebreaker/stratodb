@@ -71,9 +71,12 @@ cargo run -p stratodb --example indexed --features derive
 Benches (criterion; require `derive` since they use a derived entity):
 
 ```sh
-cargo bench -p stratodb --features derive               # all
+cargo bench -p stratodb --features derive               # all (slim: console + baselines, no HTML/plots)
 cargo bench -p stratodb --features derive --bench reads  # one category
+cargo do bench-reports                                   # full HTML report + SVG plots (see below)
 ```
+
+`criterion` is pinned `default-features = false` (only `cargo_bench_support`), so the heavy `plotters`/`rayon`/HTML-report trees are NOT compiled by default — crucially, `--all-features` does NOT pull them either (no package feature references them), so the gate stays slim. The full report is opt-in by enabling criterion's own features **on the command line** (`--features criterion/html_reports,criterion/plotters,criterion/rayon`), wrapped as the `bench-reports` script in `[workspace.metadata.scripts]` (run via `cargo do bench-reports`). Do NOT turn this into a package feature — `--all-features` would then re-pull plotters into the gate.
 
 Note: `cargo test --all-features --all-targets` (the gate's first line) compiles **and runs** the benches once each in criterion's test mode, so a broken bench fails the gate. Keep the fixture sizes (`benches/common`: `DATASET`, `RING`) modest enough that this stays fast.
 

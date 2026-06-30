@@ -411,6 +411,13 @@ cargo bench -p stratodb --features derive               # everything
 cargo bench -p stratodb --features derive --bench reads  # one category
 ```
 
+By default Criterion is pulled in slim (`default-features = false`): benches print their statistics to the console and write the measurement data under `target/criterion` (usable as baselines with `--save-baseline` / `--baseline`), but no HTML report or plots are generated — this keeps the build, and the test gate, light. For the full **HTML report + SVG plots** (handy when comparing against other stores), opt back into Criterion's heavier features on the command line:
+```sh
+cargo do bench-reports   # alias for the line below
+cargo bench -p stratodb --features derive --features criterion/html_reports,criterion/plotters,criterion/rayon
+```
+Enabling them on the command line (rather than as a crate feature) means `--all-features` builds — including the gate — stay slim.
+
 | Bench           | Covers                                                                                                                           |
 |-----------------|----------------------------------------------------------------------------------------------------------------------------------|
 | `reads`         | scalar read, scalar read guarded by a presence test, full-entity `load`, one field through the zero-copy accessor                |
