@@ -1,10 +1,34 @@
 //! Integration tests for the storage foundation: the untyped node tree, paths,
 //! transactions, cascade deletes and persistence.
 
-use stratodb::{error::SdbError, data::Scalar, NodeKind, StratoDb};
+use stratodb::{error::SdbError, data::Scalar, path::SPath, NodeKind, StratoDb};
 
 fn mem_db() -> StratoDb {
     StratoDb::create_in_memory().expect("create db")
+}
+
+#[test]
+fn store_many_writes_every_pair() {
+    let db = mem_db();
+    let table = db.open_table("data").unwrap();
+
+    // Owned values kept in scope so the pairs can borrow them.
+    let (x, y, z) = (1i32, 2i32, 3i32);
+    let pairs = vec![
+        (SPath::parse("users/a/score").unwrap(), &x),
+        (SPath::parse("users/b/score").unwrap(), &y),
+        (SPath::parse("users/c/score").unwrap(), &z),
+    ];
+
+    let w = table.write().unwrap();
+    w.store_many(&pairs).unwrap();
+    w.commit().unwrap();
+
+    let r = table.read().unwrap();
+    assert_eq!(r.get::<i32>("users/a/score").unwrap(), Some(1));
+    assert_eq!(r.get::<i32>("users/b/score").unwrap(), Some(2));
+    assert_eq!(r.get::<i32>("users/c/score").unwrap(), Some(3));
+    assert_eq!(r.load::<i32>("users/c/score").unwrap(), 3);
 }
 
 #[test]

@@ -145,13 +145,129 @@ impl WriteTxn {
     /// it may, unless some index pattern matches entities *strictly below* `base`
     /// (those need their own keys, so the subtree must stay shredded).
     pub(crate) fn should_pack(&self, base: &SPath) -> SdbResult<bool> {
-        for entry in self.indexes()? {
-            if Pattern::parse(entry.def().pattern())?.covers_strictly_below(base) {
-                return Ok(false);
+        let patterns = self.index_patterns()?;
+
+        Ok(!patterns.iter().any(|p| p.covers_strictly_below(base)))
+    }
+
+    /// This table's index patterns, parsed once.
+    fn index_patterns(&self) -> SdbResult<Vec<Pattern>> {
+        self.indexes()?
+            .iter()
+            .map(|entry| Pattern::parse(entry.def().pattern()))
+            .collect()
+    }
+
+    /// Stores many `(path, value)` pairs in this transaction.
+    ///
+    /// With the `parallel` feature, the CPU-bound packing of each entity (building
+    /// its blob) runs across rayon threads; the engine writes are then applied
+    /// sequentially (a redb write transaction is single-threaded). Without the
+    /// feature this is a plain sequential loop of [`store`](Self::store). Either
+    /// way the result is exactly that of storing each pair in order.
+    #[cfg(feature = "parallel")]
+    pub fn store_many<T: SData + Sync>(&self, items: &[(SPath, &T)]) -> SdbResult<()> {
+        use rayon::prelude::*;
+
+        /// One pair's pre-built result: a ready packed node, or an index back into
+        /// `items` for the (rare) pairs that cannot pack and fall back to `store`.
+        enum Built {
+            Packed {
+                base:   SPath,
+                parent: SPath,
+                last:   Segment,
+                node:   crate::node::Node,
+            },
+            Plain(usize),
+        }
+
+        // Patterns are read once, before the parallel section: the build closure
+        // must not touch the (non-`Sync`) write transaction, only pure CPU work.
+        let patterns = self.index_patterns()?;
+        let packable = |base: &SPath| !patterns.iter().any(|p| p.covers_strictly_below(base));
+
+        let built = items
+            .par_iter()
+            .enumerate()
+            .map(|(index, (path, value))| match path.split_last() {
+                Some((parent, last)) if packable(path) => {
+                    let mut mem = MemNodes::new();
+                    {
+                        let cell = RefCell::new(&mut mem);
+                        value.store(&BoundCursor::new(&cell, Skey::ROOT), &SPath::root())?;
+                    }
+
+                    Ok(Built::Packed {
+                        base: path.clone(),
+                        parent,
+                        last: last.clone(),
+                        node: mem.into_packed()?,
+                    })
+                }
+                _ => Ok(Built::Plain(index)),
+            })
+            .collect::<SdbResult<Vec<_>>>()?;
+
+        // Apply every packed write under one table handle (no per-entity reopen),
+        // resolving each distinct parent only once and bracketing each with index
+        // maintenance. Non-packable pairs are deferred and stored after the handle
+        // is dropped (each opens its own).
+        let mut plain = Vec::new();
+        {
+            let indexes = self.indexes()?;
+            let mut table = self.txn.open_table(engine::data_def(&self.table))?;
+            // Parent path -> key, valid for this loop: it only ever creates/links
+            // children (additive), so a parent's key never changes mid-batch.
+            let mut parents: std::collections::HashMap<SPath, Skey> = std::collections::HashMap::new();
+
+            for item in built {
+                match item {
+                    Built::Packed {
+                        base,
+                        parent,
+                        last,
+                        node,
+                    } => {
+                        if !indexes.is_empty() {
+                            maintenance::delete(&mut table, indexes, &base)?;
+                        }
+
+                        let parent_key = match parents.get(&parent) {
+                            Some(key) => *key,
+                            None => {
+                                let key =
+                                    tree::ensure_container(&mut table, &parent, matches!(last, Segment::Index(_)))?;
+                                parents.insert(parent.clone(), key);
+                                key
+                            }
+                        };
+
+                        tree::store_packed_under(&mut table, parent_key, &parent, &last, node)?;
+
+                        if !indexes.is_empty() {
+                            maintenance::insert(&mut table, indexes, &base)?;
+                        }
+                    }
+                    Built::Plain(index) => plain.push(index),
+                }
             }
         }
 
-        Ok(true)
+        for index in plain {
+            self.store_at(&items[index].0, items[index].1)?;
+        }
+
+        Ok(())
+    }
+
+    /// Sequential `store_many` when the `parallel` feature is off.
+    #[cfg(not(feature = "parallel"))]
+    pub fn store_many<T: SData>(&self, items: &[(SPath, &T)]) -> SdbResult<()> {
+        for (path, value) in items {
+            self.store_at(path, *value)?;
+        }
+
+        Ok(())
     }
 
     pub(crate) fn get_at<V: SValue>(&self, path: &SPath) -> SdbResult<Option<V>> {

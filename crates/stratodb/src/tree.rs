@@ -692,6 +692,23 @@ fn unexpected(path: &SPath, expected: &'static str, found: &'static str) -> SdbE
 /// container exists and linking the entity (a fresh key) into it.
 pub(crate) fn store_packed<B: WriteNodes>(b: &mut B, parent_path: &SPath, last: &Segment, node: Node) -> SdbResult<()> {
     let parent_key = ensure_container(b, parent_path, matches!(last, Segment::Index(_)))?;
+    store_packed_under(b, parent_key, parent_path, last, node)
+}
+
+/// Like [`store_packed`] but with the parent already resolved to `parent_key`, so
+/// a batch sharing a parent resolves it once. Replaces any existing child at
+/// `last` (its old subtree is dropped) and links the fresh entity in.
+pub(crate) fn store_packed_under<B: WriteNodes>(
+    b: &mut B,
+    parent_key: Skey,
+    parent_path: &SPath,
+    last: &Segment,
+    node: Node,
+) -> SdbResult<()> {
+    if let Some(old) = child_key(&*b, parent_key, last)? {
+        cascade_delete(b, old)?;
+    }
+
     let entity = Skey::generate();
     write_node(b, entity, node)?;
     attach_child(b, parent_key, parent_path, last, entity)
