@@ -20,7 +20,6 @@ use crate::{
 };
 
 use redb::{ReadableTable, Table};
-use std::collections::BTreeMap;
 
 /// A writable engine table over StratoDB keys and values.
 type DataTable<'txn> = Table<'txn, TableKey, TableValue>;
@@ -37,6 +36,93 @@ pub(crate) fn read_node<T: ReadableTable<TableKey, TableValue>>(t: &T, key: Skey
         },
         None => Ok(None),
     }
+}
+
+// --------------------------------------------------------------------------
+// Object child links (one engine entry per `(parent, name)`)
+// --------------------------------------------------------------------------
+
+/// The child key under object `parent` for field `name`, if present. A single
+/// point lookup — no parent node is read or deserialized.
+fn object_child<T: ReadableTable<TableKey, TableValue>>(t: &T, parent: Skey, name: &str) -> SdbResult<Option<Skey>> {
+    let key = TableKey::Child {
+        parent,
+        name: name.to_string(),
+    };
+
+    match t.get(&key)? {
+        Some(guard) => match guard.value() {
+            TableValue::Skey(child) => Ok(Some(child)),
+            _ => Err(SdbError::Corrupt("object child link is not a key".into())),
+        },
+        None => Ok(None),
+    }
+}
+
+/// Every `(name, child key)` of object `parent`, in ascending name order — one
+/// forward range scan over the parent's contiguous child-link block.
+pub(crate) fn object_children<T: ReadableTable<TableKey, TableValue>>(
+    t: &T,
+    parent: Skey,
+) -> SdbResult<Vec<(String, Skey)>> {
+    let lower = TableKey::Child {
+        parent,
+        name: String::new(),
+    };
+
+    let mut out = Vec::new();
+    for item in t.range(lower..)? {
+        let (key, value) = item?;
+        match key.value() {
+            TableKey::Child {
+                parent: p,
+                name,
+            } if p == parent => match value.value() {
+                TableValue::Skey(child) => out.push((name, child)),
+                _ => return Err(SdbError::Corrupt("object child link is not a key".into())),
+            },
+            _ => break,
+        }
+    }
+
+    Ok(out)
+}
+
+/// Links `child` under object `parent` at `name`, replacing any existing link.
+fn put_object_child(t: &mut DataTable<'_>, parent: Skey, name: &str, child: Skey) -> SdbResult<()> {
+    let key = TableKey::Child {
+        parent,
+        name: name.to_string(),
+    };
+
+    t.insert(&key, &TableValue::Skey(child))?;
+    Ok(())
+}
+
+/// Unlinks `name` from object `parent`, if present.
+fn remove_object_child(t: &mut DataTable<'_>, parent: Skey, name: &str) -> SdbResult<()> {
+    let key = TableKey::Child {
+        parent,
+        name: name.to_string(),
+    };
+
+    t.remove(&key)?;
+    Ok(())
+}
+
+/// Removes every child link of object `parent` and returns the child keys it held
+/// (so the caller can recurse into them). The parent node itself is untouched.
+fn take_object_children(t: &mut DataTable<'_>, parent: Skey) -> SdbResult<Vec<Skey>> {
+    // redb's range borrows the table, so collect the links before removing them.
+    let links: Vec<(String, Skey)> = object_children(&*t, parent)?;
+
+    let mut children = Vec::with_capacity(links.len());
+    for (name, child) in links {
+        remove_object_child(t, parent, &name)?;
+        children.push(child);
+    }
+
+    Ok(children)
 }
 
 /// Resolves `path` to a primary key by walking from the root, or `None` if the
@@ -65,17 +151,16 @@ pub(crate) fn child_key<T: ReadableTable<TableKey, TableValue>>(
     parent: Skey,
     seg: &Segment,
 ) -> SdbResult<Option<Skey>> {
-    let Some(node) = read_node(t, parent)? else {
-        return Ok(None);
-    };
-
-    let child = match (node, seg) {
-        (Node::Object(map), Segment::Name(name)) => map.get(name).copied(),
-        (Node::List(items), Segment::Index(index)) => items.get(*index as usize).copied(),
-        _ => None,
-    };
-
-    Ok(child)
+    match seg {
+        // An object child is a direct point lookup; the parent node is never read.
+        // A name on a non-object parent simply has no such child link, so this
+        // returns `None` — the same answer the old whole-node match gave.
+        Segment::Name(name) => object_child(t, parent, name),
+        Segment::Index(index) => match read_node(t, parent)? {
+            Some(Node::List(items)) => Ok(items.get(*index as usize).copied()),
+            _ => Ok(None),
+        },
+    }
 }
 
 /// Reads the scalar stored at `path`, if it is a leaf.
@@ -136,7 +221,7 @@ pub(crate) fn list_len<T: ReadableTable<TableKey, TableValue>>(t: &T, key: Skey)
 /// Returns the field names of the object node `key`, in sorted (`BTreeMap`) order.
 pub(crate) fn object_keys<T: ReadableTable<TableKey, TableValue>>(t: &T, key: Skey) -> SdbResult<Vec<String>> {
     match read_node(t, key)? {
-        Some(Node::Object(map)) => Ok(map.into_keys().collect()),
+        Some(Node::Object) => Ok(object_children(t, key)?.into_iter().map(|(name, _)| name).collect()),
         Some(other) => Err(SdbError::Corrupt(format!(
             "node {key} is a {}, expected an object",
             other.kind().as_str()
@@ -150,7 +235,7 @@ pub(crate) fn object_keys<T: ReadableTable<TableKey, TableValue>>(t: &T, key: Sk
 /// has no children. Used to expand an index pattern's `*` over every child.
 pub(crate) fn children<T: ReadableTable<TableKey, TableValue>>(t: &T, key: Skey) -> SdbResult<Vec<Skey>> {
     match read_node(t, key)? {
-        Some(Node::Object(map)) => Ok(map.into_values().collect()),
+        Some(Node::Object) => Ok(object_children(t, key)?.into_iter().map(|(_, child)| child).collect()),
         Some(Node::List(items)) => Ok(items),
         Some(Node::Leaf(_)) | None => Ok(Vec::new()),
     }
@@ -210,13 +295,14 @@ pub(crate) fn put_scalar(t: &mut DataTable<'_>, path: &SPath, scalar: Scalar) ->
         return put_root_scalar(t, scalar);
     };
 
-    // Replace semantics: drop the old subtree at this path first.
-    if let Some(old) = resolve(&*t, path)? {
-        cascade_delete(t, old)?;
-    }
-
     let child_is_index = matches!(last, Segment::Index(_));
     let parent_key = ensure_container(t, &parent_path, child_is_index)?;
+
+    // Replace semantics: drop the old subtree at this child, if any. Looking it up
+    // through the now-resolved parent avoids re-walking the whole path from root.
+    if let Some(old) = child_key(&*t, parent_key, last)? {
+        cascade_delete(t, old)?;
+    }
 
     let leaf = Skey::generate();
     write_node(t, leaf, &Node::Leaf(scalar))?;
@@ -230,6 +316,94 @@ fn put_root_scalar(t: &mut DataTable<'_>, scalar: Scalar) -> SdbResult<()> {
     }
 
     write_node(t, Skey::ROOT, &Node::Leaf(scalar))
+}
+
+// --------------------------------------------------------------------------
+// Root-anchored operations
+//
+// These mirror `put_scalar` / `ensure_container` / `remove_path` but walk from an
+// arbitrary, already-existing `root` key instead of `Skey::ROOT`. A whole-entity
+// `store` resolves the entity's parent once and then drives every field through
+// these, so a field no longer re-walks the path from the table root on each write.
+// --------------------------------------------------------------------------
+
+/// Ensures a container exists at `rel` (relative to the existing node `root`),
+/// creating intermediate containers as needed, and returns its key.
+pub(crate) fn ensure_container_rel(
+    t: &mut DataTable<'_>,
+    root: Skey,
+    rel: &SPath,
+    child_is_index: bool,
+) -> SdbResult<Skey> {
+    let Some((parent_rel, last)) = rel.split_last() else {
+        let node = read_node(&*t, root)?.ok_or_else(|| {
+            const MSG: &str = "relative-store root points to a missing node";
+
+            SdbError::Corrupt(MSG.into())
+        })?;
+
+        return verify_container(node.kind(), &SPath::root(), child_is_index).map(|()| root);
+    };
+
+    if let Some(key) = resolve_from(&*t, root, rel)? {
+        let node = read_node(&*t, key)?.ok_or_else(|| {
+            const MSG: &str = "resolved relative path points to a missing node";
+
+            SdbError::Corrupt(MSG.into())
+        })?;
+
+        return verify_container(node.kind(), rel, child_is_index).map(|()| key);
+    }
+
+    let parent_key = ensure_container_rel(t, root, &parent_rel, matches!(last, Segment::Index(_)))?;
+
+    let key = Skey::generate();
+    write_node(t, key, &empty_container(child_is_index))?;
+    attach_child(t, parent_key, &parent_rel, last, key)?;
+    Ok(key)
+}
+
+/// Stores `scalar` at `rel` (relative to the existing node `root`), replacing any
+/// existing subtree there and creating container ancestors as needed.
+pub(crate) fn put_scalar_rel(t: &mut DataTable<'_>, root: Skey, rel: &SPath, scalar: Scalar) -> SdbResult<()> {
+    let Some((parent_rel, last)) = rel.split_last() else {
+        // Setting the anchored root itself to a leaf — drop whatever it held first.
+        if read_node(&*t, root)?.is_some() {
+            cascade_delete(t, root)?;
+        }
+
+        return write_node(t, root, &Node::Leaf(scalar));
+    };
+
+    let child_is_index = matches!(last, Segment::Index(_));
+    let parent_key = ensure_container_rel(t, root, &parent_rel, child_is_index)?;
+
+    if let Some(old) = child_key(&*t, parent_key, last)? {
+        cascade_delete(t, old)?;
+    }
+
+    let leaf = Skey::generate();
+    write_node(t, leaf, &Node::Leaf(scalar))?;
+    attach_child(t, parent_key, &parent_rel, last, leaf)?;
+    Ok(())
+}
+
+/// Removes the subtree at `rel` (relative to `root`), returning whether anything
+/// was removed.
+pub(crate) fn remove_rel(t: &mut DataTable<'_>, root: Skey, rel: &SPath) -> SdbResult<bool> {
+    let Some(key) = resolve_from(&*t, root, rel)? else {
+        return Ok(false);
+    };
+
+    cascade_delete(t, key)?;
+
+    if let Some((parent_rel, last)) = rel.split_last()
+        && let Some(parent_key) = resolve_from(&*t, root, &parent_rel)?
+    {
+        detach_child(t, parent_key, &parent_rel, last)?;
+    }
+
+    Ok(true)
 }
 
 /// Removes the subtree at `path`, returning whether anything was removed.
@@ -291,11 +465,7 @@ fn ensure_root(t: &mut DataTable<'_>, child_is_index: bool) -> SdbResult<Skey> {
 }
 
 fn empty_container(is_list: bool) -> Node {
-    if is_list {
-        Node::List(Vec::new())
-    } else {
-        Node::Object(BTreeMap::new())
-    }
+    if is_list { Node::List(Vec::new()) } else { Node::Object }
 }
 
 fn verify_container(kind: NodeKind, path: &SPath, child_is_index: bool) -> SdbResult<()> {
@@ -316,7 +486,9 @@ fn verify_container(kind: NodeKind, path: &SPath, child_is_index: bool) -> SdbRe
     }
 }
 
-/// Links `child` under `parent` at the final segment, updating the parent node.
+/// Links `child` under `parent` at the final segment. An object child is written
+/// as its own child-link entry (no parent rewrite); a list element updates the
+/// parent list node's vector.
 fn attach_child(
     t: &mut DataTable<'_>,
     parent_key: Skey,
@@ -324,68 +496,70 @@ fn attach_child(
     last: &Segment,
     child: Skey,
 ) -> SdbResult<()> {
-    let mut node = read_node(&*t, parent_key)?.ok_or_else(|| {
-        const MSG: &str = "missing parent node while attaching";
+    match last {
+        // An object link is a single point write; the parent node is never read or
+        // rewritten, so a wide object no longer costs O(siblings) per child.
+        Segment::Name(name) => put_object_child(t, parent_key, name, child),
+        Segment::Index(index) => {
+            let mut node = read_node(&*t, parent_key)?.ok_or_else(|| {
+                const MSG: &str = "missing parent node while attaching";
 
-        SdbError::Corrupt(MSG.into())
-    })?;
+                SdbError::Corrupt(MSG.into())
+            })?;
 
-    match (&mut node, last) {
-        (Node::Object(map), Segment::Name(name)) => {
-            map.insert(name.clone(), child);
-        }
-        (Node::List(items), Segment::Index(index)) => {
-            let index = *index;
-            let len = items.len() as u64;
+            match &mut node {
+                Node::List(items) => {
+                    let index = *index;
+                    let len = items.len() as u64;
 
-            if index < len {
-                items[index as usize] = child;
-            } else if index == len {
-                items.push(child);
-            } else {
-                return Err(SdbError::IndexOutOfRange {
-                    path: parent_path.child_index(index),
-                    index,
-                    len,
-                });
+                    if index < len {
+                        items[index as usize] = child;
+                    } else if index == len {
+                        items.push(child);
+                    } else {
+                        return Err(SdbError::IndexOutOfRange {
+                            path: parent_path.child_index(index),
+                            index,
+                            len,
+                        });
+                    }
+                }
+                Node::Object => return Err(unexpected(parent_path, "list", "object")),
+                Node::Leaf(_) => return Err(unexpected(parent_path, "container", "leaf")),
             }
-        }
-        (Node::Object(_), Segment::Index(_)) => return Err(unexpected(parent_path, "list", "object")),
-        (Node::List(_), Segment::Name(_)) => return Err(unexpected(parent_path, "object", "list")),
-        (Node::Leaf(_), _) => return Err(unexpected(parent_path, "container", "leaf")),
-    }
 
-    write_node(t, parent_key, &node)?;
-    Ok(())
+            write_node(t, parent_key, &node)
+        }
+    }
 }
 
-/// Unlinks the final segment from `parent`, updating the parent node. Removing a
-/// list element shifts the following elements left in the vector — and because
-/// paths are walked (not indexed), nothing else needs rewriting.
+/// Unlinks the final segment from `parent`. An object child drops its child-link
+/// entry; a list element shifts the following elements left in the vector — and
+/// because paths are walked (not indexed), nothing else needs rewriting.
 fn detach_child(t: &mut DataTable<'_>, parent_key: Skey, parent_path: &SPath, last: &Segment) -> SdbResult<()> {
-    let mut node = read_node(&*t, parent_key)?.ok_or_else(|| {
-        const MSG: &str = "missing parent node while detaching";
+    match last {
+        Segment::Name(name) => remove_object_child(t, parent_key, name),
+        Segment::Index(index) => {
+            let mut node = read_node(&*t, parent_key)?.ok_or_else(|| {
+                const MSG: &str = "missing parent node while detaching";
 
-        SdbError::Corrupt(MSG.into())
-    })?;
+                SdbError::Corrupt(MSG.into())
+            })?;
 
-    match (&mut node, last) {
-        (Node::Object(map), Segment::Name(name)) => {
-            map.remove(name);
-        }
-        (Node::List(items), Segment::Index(index)) => {
-            let index = *index as usize;
-            if index < items.len() {
-                items.remove(index);
+            match &mut node {
+                Node::List(items) => {
+                    let index = *index as usize;
+                    if index < items.len() {
+                        items.remove(index);
+                    }
+                }
+                Node::Object => return Err(unexpected(parent_path, "list", "object")),
+                Node::Leaf(_) => return Err(unexpected(parent_path, "container", "leaf")),
             }
-        }
-        (Node::Object(_), Segment::Index(_)) => return Err(unexpected(parent_path, "list", "object")),
-        (Node::List(_), Segment::Name(_)) => return Err(unexpected(parent_path, "object", "list")),
-        (Node::Leaf(_), _) => return Err(unexpected(parent_path, "container", "leaf")),
-    }
 
-    write_node(t, parent_key, &node)?;
-    Ok(())
+            write_node(t, parent_key, &node)
+        }
+    }
 }
 
 /// Reorders a list element from `from` to `to` within the list node `list_key`.
@@ -467,12 +641,12 @@ pub(crate) fn clear_children(t: &mut DataTable<'_>, key: Skey) -> SdbResult<()> 
     })?;
 
     match node {
-        Node::Object(map) => {
-            for child in map.into_values() {
+        Node::Object => {
+            for child in take_object_children(t, key)? {
                 cascade_delete(t, child)?;
             }
 
-            write_node(t, key, &Node::Object(BTreeMap::new()))?;
+            // The object marker stays in place; only its child links are gone.
         }
         Node::List(items) => {
             for child in items {
@@ -495,7 +669,9 @@ fn cascade_delete(t: &mut DataTable<'_>, key: Skey) -> SdbResult<()> {
     while let Some(key) = stack.pop() {
         if let Some(node) = read_node(&*t, key)? {
             match node {
-                Node::Object(map) => stack.extend(map.into_values()),
+                // Detaches and collects the object's child links as we descend, so
+                // no orphan link entry survives the deletion.
+                Node::Object => stack.extend(take_object_children(t, key)?),
                 Node::List(items) => stack.extend(items),
                 Node::Leaf(_) => {}
             }

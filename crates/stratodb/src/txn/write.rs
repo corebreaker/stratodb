@@ -2,7 +2,7 @@
 
 use super::rooted::RootedWrite;
 use crate::{
-    access::{Reader, WriteCursor, Writer},
+    access::{BoundCursor, Reader, WriteCursor, Writer},
     data::{refs::SMut, SData, Scalar, SValue},
     db::DbInner,
     engine::{self, TableKey, TableValue},
@@ -18,7 +18,10 @@ use crate::{
 };
 
 use redb::{Table, WriteTransaction};
-use std::sync::{atomic::Ordering, Arc, OnceLock};
+use std::{
+    cell::RefCell,
+    sync::{atomic::Ordering, Arc, OnceLock},
+};
 
 /// The writable engine table holding this table's nodes and index entries.
 type DataTable<'txn> = Table<'txn, TableKey, TableValue>;
@@ -96,10 +99,25 @@ impl WriteTxn {
     // -- path-addressed cores (shared by the `&str` API and rooted views) --
 
     pub(crate) fn store_at<T: SData>(&self, base: &SPath, value: &T) -> SdbResult<()> {
-        let cursor = WriteCursor::new(self);
-        cursor.remove(base)?;
+        let Some((parent_path, last)) = base.split_last() else {
+            // Storing at the table root: nothing to anchor to, so take the plain path.
+            let cursor = WriteCursor::new(self);
+            cursor.remove(base)?;
 
-        value.store(&cursor, base)
+            return value.store(&cursor, base);
+        };
+
+        // One index-maintenance bracket and one open table handle for the whole
+        // entity: clear the old subtree, resolve the entity's parent once, then let
+        // every field write resolve relative to that anchor instead of the root.
+        let rel = segment_path(last);
+        self.reindex_around(base, |table| {
+            tree::remove_path(table, base)?;
+            let anchor = tree::ensure_container(table, &parent_path, matches!(last, Segment::Index(_)))?;
+
+            let cell = RefCell::new(table);
+            value.store(&BoundCursor::new(&cell, anchor), &rel)
+        })
     }
 
     pub(crate) fn get_at<V: SValue>(&self, path: &SPath) -> SdbResult<Option<V>> {
@@ -178,7 +196,11 @@ impl WriteTxn {
     /// entities `scope` could affect are de-indexed before the change and
     /// re-indexed after it. Tables with no indexes take a direct, zero-overhead
     /// path.
-    fn reindex_around<R>(&self, scope: &SPath, apply: impl FnOnce(&mut DataTable<'_>) -> SdbResult<R>) -> SdbResult<R> {
+    pub(crate) fn reindex_around<R>(
+        &self,
+        scope: &SPath,
+        apply: impl FnOnce(&mut DataTable<'_>) -> SdbResult<R>,
+    ) -> SdbResult<R> {
         let indexes = self.indexes()?;
         let mut table = self.txn.open_table(engine::data_def(&self.table))?;
 
@@ -265,5 +287,14 @@ impl WriteTxn {
 
     pub(crate) fn remove_path_at(&self, path: &SPath) -> SdbResult<bool> {
         self.reindex_around(path, |table| tree::remove_path(table, path))
+    }
+}
+
+/// The single-segment path holding just `seg`, used to drive a bound store one
+/// segment below its anchor.
+pub(crate) fn segment_path(seg: &Segment) -> SPath {
+    match seg {
+        Segment::Name(name) => SPath::root().child_name(name),
+        Segment::Index(index) => SPath::root().child_index(*index),
     }
 }

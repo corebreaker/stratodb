@@ -15,7 +15,7 @@ use crate::{
 };
 
 use redb::{ReadOnlyTable, ReadTransaction, TableError};
-use std::{collections::HashSet, sync::Arc};
+use std::{collections::HashSet, sync::Arc, sync::OnceLock};
 
 /// A read-only view of a table at a consistent point in time.
 pub struct ReadTxn {
@@ -23,6 +23,11 @@ pub struct ReadTxn {
     table:      String,
     generation: u64,
     cache:      Arc<PathCache>,
+    /// The opened data table, materialized once and reused for every node read in
+    /// this transaction (redb's `ReadOnlyTable` is independent of the transaction
+    /// borrow). Reopening per read was a measurable cost on multi-field loads and
+    /// index scans. `None` once computed means the table has never been written.
+    data_table: OnceLock<Option<ReadOnlyTable<TableKey, TableValue>>>,
 }
 
 impl ReadTxn {
@@ -32,16 +37,24 @@ impl ReadTxn {
             table,
             generation,
             cache,
+            data_table: OnceLock::new(),
         }
     }
 
-    /// Opens the underlying table, or `None` if it has never been written.
-    pub(super) fn open(&self) -> SdbResult<Option<ReadOnlyTable<TableKey, TableValue>>> {
-        match self.txn.open_table(engine::data_def(&self.table)) {
-            Ok(table) => Ok(Some(table)),
-            Err(TableError::TableDoesNotExist(_)) => Ok(None),
-            Err(error) => Err(error.into()),
+    /// The opened data table, cached for the lifetime of the transaction; `None` if
+    /// it has never been written.
+    pub(crate) fn open(&self) -> SdbResult<Option<&ReadOnlyTable<TableKey, TableValue>>> {
+        if let Some(cached) = self.data_table.get() {
+            return Ok(cached.as_ref());
         }
+
+        let opened = match self.txn.open_table(engine::data_def(&self.table)) {
+            Ok(table) => Some(table),
+            Err(TableError::TableDoesNotExist(_)) => None,
+            Err(error) => return Err(error.into()),
+        };
+
+        Ok(self.data_table.get_or_init(|| opened).as_ref())
     }
 
     /// Reads the value at `path`, decoded as `V`.
@@ -172,7 +185,7 @@ impl ReadTxn {
             return Ok(Vec::new());
         };
 
-        let mut entities = scan_prefix(&table, id, &cols, def.unique())?;
+        let mut entities = scan_prefix(table, id, &cols, def.unique())?;
 
         // Restrict to entities at or under `root`. An entity is in scope only if
         // the pattern reaches at least the root's depth; when it does,
@@ -184,7 +197,7 @@ impl ReadTxn {
                 return Ok(Vec::new());
             }
 
-            let under: HashSet<Skey> = pattern.affected_entities(&table, root)?.into_iter().collect();
+            let under: HashSet<Skey> = pattern.affected_entities(table, root)?.into_iter().collect();
             entities.retain(|entity| under.contains(entity));
         }
 
@@ -215,7 +228,7 @@ impl ReadTxn {
             return Ok(None);
         };
 
-        let resolved = tree::resolve(&table, path)?;
+        let resolved = tree::resolve(table, path)?;
         if let Some(key) = resolved {
             self.cache.put(self.generation, path, key)?;
         }
@@ -233,7 +246,7 @@ impl ReadTxn {
             return Ok(None);
         };
 
-        match tree::read_node(&table, key)? {
+        match tree::read_node(table, key)? {
             Some(Node::Leaf(scalar)) => Ok(Some(scalar)),
             Some(other) => Err(SdbError::UnexpectedNode {
                 path:     path.clone(),
@@ -249,7 +262,7 @@ impl ReadTxn {
             return Ok(None);
         };
 
-        tree::child_key(&table, parent, seg)
+        tree::child_key(table, parent, seg)
     }
 
     /// Resolves `parent`'s `seg` child, consulting and populating the shared cache
@@ -270,7 +283,7 @@ impl ReadTxn {
             return Ok(None);
         };
 
-        let resolved = tree::child_key(&table, parent, seg)?;
+        let resolved = tree::child_key(table, parent, seg)?;
         if let Some(key) = resolved {
             self.cache.put(self.generation, child_path, key)?;
         }
@@ -283,7 +296,7 @@ impl ReadTxn {
             .open()?
             .ok_or_else(|| SdbError::Corrupt("read on a missing table".into()))?;
 
-        tree::scalar_at(&table, key)
+        tree::scalar_at(table, key)
     }
 
     pub(crate) fn lookup_scalar_at(&self, path: &SPath) -> SdbResult<Option<Scalar>> {
@@ -295,7 +308,7 @@ impl ReadTxn {
             return Ok(None);
         };
 
-        tree::kind_of(&table, key)
+        tree::kind_of(table, key)
     }
 
     pub(crate) fn lookup_len(&self, key: Skey) -> SdbResult<usize> {
@@ -303,7 +316,7 @@ impl ReadTxn {
             .open()?
             .ok_or_else(|| SdbError::Corrupt("read on a missing table".into()))?;
 
-        tree::list_len(&table, key)
+        tree::list_len(table, key)
     }
 
     pub(crate) fn lookup_object_keys(&self, key: Skey) -> SdbResult<Vec<String>> {
@@ -311,7 +324,7 @@ impl ReadTxn {
             .open()?
             .ok_or_else(|| SdbError::Corrupt("read on a missing table".into()))?;
 
-        tree::object_keys(&table, key)
+        tree::object_keys(table, key)
     }
 }
 

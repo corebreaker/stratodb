@@ -26,6 +26,8 @@ use std::cmp::Ordering;
 
 mod tag {
     pub(super) const DATA: u8 = 0;
+    /// Object child link: `parent · name`.
+    pub(super) const CHILD: u8 = 1;
     /// Non-unique index entry: `id · cols · entity`.
     pub(super) const INDEX_DUP: u8 = 2;
     /// Unique index entry: `id · cols` (entity is in the value).
@@ -37,6 +39,12 @@ mod tag {
 pub(crate) enum TableKey {
     /// A node, addressed by its primary key.
     Data(Skey),
+    /// An object's child link: the child key under `parent` for field `name`.
+    /// Encoded as `parent(16) · name`, so every child of one parent forms one
+    /// contiguous, name-sorted key block — a child is a point lookup, and a
+    /// parent's whole child set is a single forward range scan. The child key is
+    /// held in the value ([`TableValue::Skey`](crate::engine::TableValue)).
+    Child { parent: Skey, name: String },
     /// An index entry. `cols` is the order-preserving encoding of the indexed
     /// columns; `entity` is `Some` for non-unique indexes (the entity lives in
     /// the key) and `None` for unique ones (the entity is stored in the value).
@@ -54,6 +62,14 @@ impl TableKey {
             TableKey::Data(skey) => {
                 buf.push(tag::DATA);
                 buf.extend_from_slice(&skey.into_bytes());
+            }
+            TableKey::Child {
+                parent,
+                name,
+            } => {
+                buf.push(tag::CHILD);
+                buf.extend_from_slice(&parent.into_bytes());
+                buf.extend_from_slice(name.as_bytes());
             }
             TableKey::Index {
                 id,
@@ -90,6 +106,23 @@ impl TableKey {
                     .map_err(|_| SdbError::Corrupt("malformed data key".into()))?;
 
                 Ok(TableKey::Data(Skey::from_bytes(bytes)))
+            }
+            tag::CHILD => {
+                // parent(16) · name(var)
+                if rest.len() < 16 {
+                    return Err(SdbError::Corrupt("child key missing parent".into()));
+                }
+
+                let (parent, name) = rest.split_at(16);
+                let parent = Skey::from_bytes(parent.try_into().expect("16 bytes"));
+                let name = std::str::from_utf8(name)
+                    .map_err(|_| SdbError::Corrupt("invalid utf-8 in child link name".into()))?
+                    .to_string();
+
+                Ok(TableKey::Child {
+                    parent,
+                    name,
+                })
             }
             tag::INDEX_DUP => {
                 // id(4) · cols(var) · entity(16)
@@ -187,6 +220,14 @@ mod tests {
     #[test]
     fn roundtrips_every_variant() {
         roundtrip(TableKey::Data(skey(7)));
+        roundtrip(TableKey::Child {
+            parent: skey(7),
+            name:   String::from("field"),
+        });
+        roundtrip(TableKey::Child {
+            parent: skey(7),
+            name:   String::new(),
+        });
         roundtrip(TableKey::Index {
             id:     IndexId(3),
             cols:   vec![1, 2, 0, 3],
@@ -211,6 +252,24 @@ mod tests {
         let ordered = [
             TableKey::Data(skey(0)),
             TableKey::Data(skey(u128::MAX)),
+            // Child entries form a contiguous block between data and index keys,
+            // grouped by parent and then sorted by name.
+            TableKey::Child {
+                parent: skey(0),
+                name:   String::new(),
+            },
+            TableKey::Child {
+                parent: skey(0),
+                name:   String::from("age"),
+            },
+            TableKey::Child {
+                parent: skey(0),
+                name:   String::from("name"),
+            },
+            TableKey::Child {
+                parent: skey(1),
+                name:   String::from("age"),
+            },
             TableKey::Index {
                 id:     IndexId(0),
                 cols:   vec![1],

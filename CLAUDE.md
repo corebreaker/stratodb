@@ -116,9 +116,9 @@ if it is many words long — do NOT insert manual line breaks within it.
 
 These choices are final and must not be revisited or worked around:
 
-**Storage model — full shredding.** Every scalar value is its own node with its own `Skey`. Paths are never persisted; they resolve by walking the tree from the fixed root key (`Skey::ROOT` = nil UUID). One redb file per `StratoDb`; one engine table per StratoDB table holds both data nodes and index entries (partitioned by a leading discriminant byte). A global reserved `$metadata` table holds the index registry and the format version.
+**Storage model — full shredding.** Every scalar value is its own node with its own `Skey`. Paths are never persisted; they resolve by walking the tree from the fixed root key (`Skey::ROOT` = nil UUID). One redb file per `StratoDb`; one engine table per StratoDB table holds data nodes, **object child links** and index entries (partitioned by a leading discriminant byte — `Data` < `Child` < index). A global reserved `$metadata` table holds the index registry and the format version (now **`2`**).
 
-**Node types:** `Object(BTreeMap<name, Skey>)`, `List(Vec<Skey>)`, `Leaf(Scalar)`. Identity is `Skey` (stable through moves and renames).
+**Node types:** `Object`, `List(Vec<Skey>)`, `Leaf(Scalar)`. Identity is `Skey` (stable through moves and renames). An object node is a **marker** — it carries no inline child map. Its `(name → child key)` links live as separate `TableKey::Child { parent, name } → Skey` entries, so attaching/detaching/looking up one child is a single engine op (point lookup or one insert/remove) and a parent's whole child set is one forward range scan. This replaced the original `Object(BTreeMap<name, Skey>)` blob, whose rewrite-the-whole-map-per-child cost made a wide object O(N) per write and a bulk fill O(N²). A list still holds its element keys inline (`Vec<Skey>`): order is positional and lists are not the wide-fan-out case. **Format `1 → 2`**: the on-disk layout changed with this; `FORMAT_VERSION` was bumped and there is no migration (pre-release).
 
 **Per-table LRU path cache.** A `PathCache` (256 k entries, `lru` crate) keyed by `(generation, SPath)` is shared across read transactions on the same table. A `version_lock` + atomic generation counter ensure a snapshot never borrows a resolution from another committed version. `WriteTxn` never uses the cache (it sees uncommitted state); `ReadCursor` is cache-backed, `WriteCursor` uses raw walks.
 
@@ -127,6 +127,8 @@ These choices are final and must not be revisited or worked around:
 **Index model.** Secondary indexes are named, composite (ordered columns), per-column ASC/DESC, with optional uniqueness. Non-unique: entity in the key (`INDEX_DUP` tag). Unique: entity in the value (`INDEX_UNIQUE` tag); collision = `UniqueViolation`. Scope = path pattern (e.g., `"users/*"`); `*` is a one-segment wildcard. Order-preserving encoding: DESC = bitwise complement; strings use a two-byte `0x00 0x01` terminator (escape `0x00` → `0x00 0xFF`) so encodings are prefix-free. Lifecycle: `create_index`/`create_indexes::<T>` register + back-fill (error on a divergent same-name redefinition); `ensure_index`/`ensure_indexes::<T>` are the idempotent-by-name variant (create + back-fill if absent, no-op — no error — if a same-name index already exists, whatever its definition); `index_def`/`has_index` introspect (`has_index` is a name-only registry scan that never materializes an `IndexDef`); `delete_index`/`delete_indexes::<T>` drop, removing the registry record and purging every physical entry in one transaction. Dropping leaves `next_id` untouched — index ids are never reused.
 
 **Write-time index maintenance.** Every mutation goes through `WriteTxn::reindex_around(scope, apply)`: delete affected index entries, apply the mutation, re-insert. The index set is loaded once per transaction into an `OnceLock<Vec<IndexEntry>>` (not `OnceCell` — keeps `WriteTxn: Sync` so `Arc<WriteCursor>` in `fetch_mut` passes clippy `arc_with_non_send_sync`).
+
+**Batched whole-value store.** A `store` / `store_value` runs the *entire* decomposition inside **one** `reindex_around` bracket and **one** open table handle: it clears the old subtree, resolves the entity's parent once, then drives every field write through a `BoundCursor` (`access/bound.rs`) — a `Reader`/`Writer` over the borrowed table that resolves **relative to the entity anchor** (via the `tree::*_rel` helpers) instead of re-walking from the root and instead of reopening the table + re-running index maintenance per field. The `BoundCursor` is used only for the additive phase (after the clear), so it never touches the path cache or does its own index maintenance. Single-field `put` / accessor mutations still use the per-call `WriteCursor`.
 
 **Accessor GATs.** `SData::Ref<'t>: SRef<'t>`, `SData::Mut<'t>: SMut<'t>`. Keys are **eager and infallible** — resolved at accessor construction; reading a scalar is `acc.x()?.get()?`. Accessors hold `Arc<dyn Reader/Writer + 't>` (type-erased, cheap to clone).
 
@@ -146,15 +148,16 @@ src/
 ├── cache.rs                PathCache (LRU, per-table, shared across read txns)
 ├── db/                     StratoDb (database.rs); DbInner (inner.rs: generation, version_lock, caches)
 ├── key.rs                  Skey (opaque 16-byte UUIDv7 primary key)
-├── node/                   NodeKind (kind.rs) + Node Object/List/Leaf + encoding (definition.rs)
+├── node/                   NodeKind (kind.rs) + Node Object(marker)/List/Leaf + encoding (definition.rs)
 ├── table.rs                Table handle → read()/write()/create_index(es)/ensure_index(es)/index_def/has_index/delete_index(es)
 ├── tree.rs                 tree walk, node resolution, list helpers
 ├── value.rs                Value enum — dynamic Leaf/List/Node tree + get_value/set_value/subtree
 ├── codec/                  byte encoding (putters, reader)
-├── engine/                 redb table defs, META_TABLE, TableKey/TableValue encoding
+├── engine/                 redb table defs, META_TABLE, TableKey (Data/Child/Index) / TableValue encoding
 ├── access/
 │   ├── reader.rs           ReadCursor + Reader trait (get_node, child_cached, object_keys…)
 │   ├── writer.rs           WriteCursor + Writer trait (put_node, ensure_container…)
+│   ├── bound.rs            BoundCursor (Reader/Writer over one open table, anchored at an entity key — batched store)
 │   └── rooted.rs           Rooted<R> adapter (re-roots SData::load at an entity key)
 ├── data/
 │   ├── definition.rs       SData trait (store/load)

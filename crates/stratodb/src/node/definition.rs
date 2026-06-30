@@ -6,19 +6,24 @@ use crate::{
     Skey,
 };
 
-use std::collections::BTreeMap;
-
 mod tag {
     pub(super) const OBJECT: u8 = 0;
     pub(super) const LIST: u8 = 1;
     pub(super) const LEAF: u8 = 2;
 }
 
-/// A stored node: either a container (object/list) of child keys, or a leaf.
+/// A stored node: either a container (object/list) or a leaf.
+///
+/// An object node carries no inline child map: its `(name -> child key)` links
+/// are stored as separate [`TableKey::Child`](crate::engine::TableKey) entries so
+/// that attaching, detaching and looking up a single child cost one engine
+/// operation instead of rewriting the whole map (which made a wide object O(N) per
+/// child write, hence O(N²) to fill). A list still holds its element keys inline:
+/// element order is positional and lists are not the wide-fan-out case.
 #[derive(Clone, Debug)]
 pub(crate) enum Node {
-    /// An object: an ordered map from field name to child key.
-    Object(BTreeMap<String, Skey>),
+    /// An object marker. Its children live in separate child-link entries.
+    Object,
     /// A list: a zero-based sequence of child keys.
     List(Vec<Skey>),
     /// A leaf: a single scalar value.
@@ -28,7 +33,7 @@ pub(crate) enum Node {
 impl Node {
     pub(crate) fn kind(&self) -> NodeKind {
         match self {
-            Node::Object(_) => NodeKind::Object,
+            Node::Object => NodeKind::Object,
             Node::List(_) => NodeKind::List,
             Node::Leaf(_) => NodeKind::Leaf,
         }
@@ -36,14 +41,8 @@ impl Node {
 
     pub(crate) fn encode(&self, buf: &mut Vec<u8>) {
         match self {
-            Node::Object(map) => {
+            Node::Object => {
                 buf.push(tag::OBJECT);
-                codec::put_u32(buf, map.len() as u32);
-
-                for (name, key) in map {
-                    codec::put_bytes(buf, name.as_bytes());
-                    buf.extend_from_slice(&key.into_bytes());
-                }
             }
             Node::List(items) => {
                 buf.push(tag::LIST);
@@ -62,20 +61,7 @@ impl Node {
 
     pub(crate) fn decode(r: &mut Reader<'_>) -> SdbResult<Node> {
         match r.u8()? {
-            tag::OBJECT => {
-                let count = r.u32()? as usize;
-                let mut map = BTreeMap::new();
-                for _ in 0..count {
-                    let name_bytes = r.bytes()?;
-                    let name = std::str::from_utf8(name_bytes)
-                        .map_err(|_| SdbError::Corrupt("invalid utf-8 in object field".into()))?
-                        .to_string();
-                    let key = Skey::from_bytes(r.array()?);
-                    map.insert(name, key);
-                }
-
-                Ok(Node::Object(map))
-            }
+            tag::OBJECT => Ok(Node::Object),
             tag::LIST => {
                 let count = r.u32()? as usize;
                 let mut items = Vec::with_capacity(count);

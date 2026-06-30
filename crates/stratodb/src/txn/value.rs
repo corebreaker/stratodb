@@ -5,20 +5,20 @@
 //! back into nodes, replacing whatever was at the path and maintaining indexes
 //! exactly as a typed `store` would.
 
-use super::{read::ReadTxn, write::WriteTxn};
+use super::{read::ReadTxn, write::WriteTxn, write::segment_path};
 use crate::{
-    access::{WriteCursor, Writer},
+    access::{BoundCursor, WriteCursor, Writer},
     engine::{TableKey, TableValue},
     error::{SdbError, SdbResult},
     node::Node,
-    path::{IntoPath, SPath},
+    path::{IntoPath, SPath, Segment},
     tree,
     Skey,
     Value,
 };
 
 use redb::ReadableTable;
-use std::collections::BTreeMap;
+use std::{cell::RefCell, collections::BTreeMap};
 
 impl ReadTxn {
     /// Loads the subtree at `path` as a [`Value`], or `None` if nothing resolves
@@ -35,13 +35,8 @@ impl ReadTxn {
             return Ok(None);
         };
 
-        match tree::resolve(&table, base)? {
-            Some(key) => match tree::read_node(&table, key)? {
-                Some(node) => Ok(Some(node_to_value(&table, node)?)),
-                None => Err(SdbError::Corrupt(
-                    "value: resolved path points to a missing node".into(),
-                )),
-            },
+        match tree::resolve(table, base)? {
+            Some(key) => Ok(Some(value_at(table, key)?)),
             None => Ok(None),
         }
     }
@@ -54,47 +49,57 @@ impl WriteTxn {
     /// scalar.
     pub fn store_value(&self, path: impl IntoPath, value: &Value) -> SdbResult<()> {
         let base = path.into_path()?;
-        let cursor = WriteCursor::new(self);
-        cursor.remove(&base)?;
 
-        write_value(&cursor, value, &base)
+        let Some((parent_path, last)) = base.split_last() else {
+            // Storing at the table root: nothing to anchor to, so take the plain path.
+            let cursor = WriteCursor::new(self);
+            cursor.remove(&base)?;
+
+            return write_value(&cursor, value, &base);
+        };
+
+        // One index-maintenance bracket and one table handle for the whole subtree,
+        // exactly like the typed `store`: see [`WriteTxn::store`].
+        let rel = segment_path(last);
+        self.reindex_around(&base, |table| {
+            tree::remove_path(table, &base)?;
+            let anchor = tree::ensure_container(table, &parent_path, matches!(last, Segment::Index(_)))?;
+
+            let cell = RefCell::new(table);
+            write_value(&BoundCursor::new(&cell, anchor), value, &rel)
+        })
     }
 }
 
-/// Converts an already-read node and its descendants into a [`Value`].
-fn node_to_value<T: ReadableTable<TableKey, TableValue>>(table: &T, node: Node) -> SdbResult<Value> {
-    let value = match node {
-        Node::Leaf(scalar) => Value::Leaf(scalar),
-        Node::List(items) => {
+/// Reads the node at `key` and converts its subtree into a [`Value`]. A dangling
+/// child key is corruption — every key held by a container must resolve to a node.
+fn value_at<T: ReadableTable<TableKey, TableValue>>(table: &T, key: Skey) -> SdbResult<Value> {
+    let value = match tree::read_node(table, key)? {
+        Some(Node::Leaf(scalar)) => Value::Leaf(scalar),
+        Some(Node::List(items)) => {
             let mut out = Vec::with_capacity(items.len());
-            for key in items {
-                out.push(child_value(table, key)?);
+            for child in items {
+                out.push(value_at(table, child)?);
             }
 
             Value::List(out)
         }
-        Node::Object(map) => {
+        Some(Node::Object) => {
             let mut out = BTreeMap::new();
-            for (name, key) in map {
-                out.insert(name, child_value(table, key)?);
+            for (name, child) in tree::object_children(table, key)? {
+                out.insert(name, value_at(table, child)?);
             }
 
             Value::Node(out)
         }
+        None => {
+            return Err(SdbError::Corrupt(
+                "value: a child key resolves to a missing node".into(),
+            ));
+        }
     };
 
     Ok(value)
-}
-
-/// Reads the node at `key` and converts its subtree. A dangling child key is
-/// corruption — every key held by a container must resolve to a node.
-fn child_value<T: ReadableTable<TableKey, TableValue>>(table: &T, key: Skey) -> SdbResult<Value> {
-    match tree::read_node(table, key)? {
-        Some(node) => node_to_value(table, node),
-        None => Err(SdbError::Corrupt(
-            "value: a child key resolves to a missing node".into(),
-        )),
-    }
 }
 
 /// Writes `value` at `at`, recursing into containers. Assumes the location was
