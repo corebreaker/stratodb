@@ -1,11 +1,11 @@
-//! A read cursor over a decoded packed entity.
+//! A read cursor over a packed entity.
 //!
-//! A packed entity is one engine value holding a whole subtree as a mini
-//! node-table ([`MemNodes`]). To read it — a `load`, a `fetch` accessor, an index
-//! column, an exported `Value` — it is decoded once into a `MemNodes` and walked
-//! with the very same tree logic used on the live table, relative to a `root` key
-//! inside the blob. `MemNodes` is immutable here, so the reader is `Send + Sync`
-//! and can back an `Arc<dyn Reader>` accessor.
+//! A packed entity is one engine value holding a whole subtree as an rkyv archive
+//! ([`ArchivedNodes`]). To read it — a `load`, a `fetch` accessor, an index
+//! column, an exported `Value` — the archive is navigated zero-copy with the very
+//! same tree logic used on the live table, relative to a `root` key inside the
+//! blob. `ArchivedNodes` is immutable here, so the reader is `Send + Sync` and can
+//! back an `Arc<dyn Reader>` accessor.
 
 use super::Reader;
 use crate::{
