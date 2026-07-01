@@ -157,7 +157,7 @@ mod tests {
     use super::*;
 
     fn lit_name(name: &str) -> PatternSeg {
-        PatternSeg::Lit(Segment::Name(name.to_string()))
+        PatternSeg::Lit(Segment::Name(name.into()))
     }
 
     #[test]

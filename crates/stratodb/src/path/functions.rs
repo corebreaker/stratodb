@@ -1,4 +1,4 @@
-use super::Segment;
+use super::segment::{Segment, Segments};
 use crate::error::{SdbError, SdbResult};
 
 pub(super) fn validate_name(name: &str, full: &str) -> SdbResult<()> {
@@ -15,17 +15,17 @@ pub(super) fn validate_name(name: &str, full: &str) -> SdbResult<()> {
     Ok(())
 }
 
-pub(super) fn parse_token(token: &str, full: &str, out: &mut Vec<Segment>) -> SdbResult<()> {
+pub(super) fn parse_token(token: &str, full: &str, out: &mut Segments) -> SdbResult<()> {
     let Some(bracket) = token.find('[') else {
         validate_name(token, full)?;
-        out.push(Segment::Name(token.to_string()));
+        out.push(Segment::Name(token.into()));
         return Ok(());
     };
 
     let name = &token[..bracket];
     if !name.is_empty() {
         validate_name(name, full)?;
-        out.push(Segment::Name(name.to_string()));
+        out.push(Segment::Name(name.into()));
     }
 
     let mut rest = &token[bracket..];

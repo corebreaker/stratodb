@@ -42,7 +42,7 @@ pub(crate) fn ref_type(
                 let key = ::stratodb::access::Reader::child_cached(
                     &self.reader,
                     self.key,
-                    &::stratodb::path::Segment::Name(::std::string::String::from(#field)),
+                    &::stratodb::path::Segment::Name(#field.into()),
                     &at,
                 )?
                 .ok_or_else(|| ::stratodb::SdbError::PathNotFound(at.clone()))?;

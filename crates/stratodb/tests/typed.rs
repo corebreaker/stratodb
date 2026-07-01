@@ -56,7 +56,7 @@ impl<'t> StratoInner<'t> {
         let at = self.base.child_name("y");
         let key = self
             .reader
-            .child_cached(self.key, &Segment::Name(String::from("y")), &at)?
+            .child_cached(self.key, &Segment::Name("y".into()), &at)?
             .ok_or_else(|| SdbError::PathNotFound(at.clone()))?;
 
         Ok(SRef::open(Arc::clone(&self.reader), at, key))
@@ -146,7 +146,7 @@ impl<'t> StratoSample<'t> {
         let at = self.base.child_name("x");
         let key = self
             .reader
-            .child_cached(self.key, &Segment::Name(String::from("x")), &at)?
+            .child_cached(self.key, &Segment::Name("x".into()), &at)?
             .ok_or_else(|| SdbError::PathNotFound(at.clone()))?;
 
         Ok(SRef::open(Arc::clone(&self.reader), at, key))
@@ -156,7 +156,7 @@ impl<'t> StratoSample<'t> {
         let at = self.base.child_name("inner");
         let key = self
             .reader
-            .child_cached(self.key, &Segment::Name(String::from("inner")), &at)?
+            .child_cached(self.key, &Segment::Name("inner".into()), &at)?
             .ok_or_else(|| SdbError::PathNotFound(at.clone()))?;
 
         Ok(SRef::open(Arc::clone(&self.reader), at, key))
@@ -198,7 +198,7 @@ impl<'t> StratoSampleMut<'t> {
         let at = self.base.child_name("inner");
         let key = self
             .writer
-            .child_cached(self.key, &Segment::Name(String::from("inner")), &at)?
+            .child_cached(self.key, &Segment::Name("inner".into()), &at)?
             .ok_or_else(|| SdbError::PathNotFound(at.clone()))?;
 
         Ok(SMut::open(Arc::clone(&self.writer), at, key))

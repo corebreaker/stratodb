@@ -9,6 +9,8 @@ description = "A typed, transactional, indexed document store layered over an em
 [dependencies]
 chrono = "0.4"
 lru = "0.18"
+smallvec = "1"
+smol_str = "0.3"
 num-bigint = { version = "0.4", optional = true }
 num-bigfloat = { version = "1.7", optional = true }
 num-rational = { version = "0.4", optional = true }
