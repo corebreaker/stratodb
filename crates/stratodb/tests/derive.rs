@@ -292,6 +292,8 @@ fn rename_rename_all_and_alias() {
 // These need no runtime store: the derive resolves each name at expansion time,
 // so asserting the generated descriptor exercises every casing rule.
 
+// ---- field casings (on structs) ------------------------------------------
+
 #[allow(dead_code)]
 #[derive(SData)]
 #[strato(rename_all = "lowercase")]
@@ -336,6 +338,8 @@ struct CaseKebab {
 struct CaseScreamingKebab {
     two_words: u32,
 }
+
+// ---- variant casings (on enums) ------------------------------------------
 
 #[allow(dead_code)]
 #[derive(SData)]

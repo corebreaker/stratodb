@@ -321,6 +321,12 @@ mod tests {
         writer.list_swap(list, 0, 1).unwrap();
         writer.list_move(list, 1, 0).unwrap();
         assert!(writer.remove(&p("k")).unwrap());
+
+        // Re-insert the just-removed key: exercises the forwarded put path after a
+        // delete (a fresh child link under the root, not an in-place overwrite).
+        writer.put_scalar(&p("k"), Scalar::I32(2)).unwrap();
+        assert_eq!(writer.scalar_at(&p("k")).unwrap(), Some(Scalar::I32(2)));
+
         writer.clear_children(&p("list"), list).unwrap();
         assert_eq!(writer.len(list).unwrap(), 0);
     }

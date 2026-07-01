@@ -422,6 +422,12 @@ mod tests {
                 cols:   vec![0],
                 entity: Some(skey(0)),
             },
+            // The last step is decided by the *tag* alone: an `entity: Some` index
+            // is non-unique (`INDEX_DUP` = 2) and an `entity: None` one is unique
+            // (`INDEX_UNIQUE` = 3), so `Some < None` here reflects `2 < 3`, never the
+            // `then_with` entity arm. That arm never sees a mixed `(Some, None)` pair
+            // (the tag already separated them) and returns `Equal` for two `None`s —
+            // i.e. two unique keys with the same id/cols, whose entity lives in the value.
             TableKey::Index {
                 id:     IndexId(1),
                 cols:   vec![0],

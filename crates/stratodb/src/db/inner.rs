@@ -186,7 +186,12 @@ mod tests {
         poison(&first.index_sets);
         assert!(first.cached_indexes("t", || Ok(vec![])).is_err());
 
-        // Poisoned by `load`, between the two locks: the second lock fails.
+        // Poisoned by `load`, between the two locks: the second (put) lock fails.
+        // This depends on `cached_indexes` releasing the first (get) lock *before*
+        // calling `load` — as it does today, the get lock lives in an inner block
+        // that drops before `load` runs. Were the two acquisitions ever merged into
+        // one guard held across `load`, poisoning here would fail that single lock
+        // and this case would silently stop covering the second `CannotAccess` arm.
         let second = inner();
         let result = second.cached_indexes("t", || {
             poison(&second.index_sets);

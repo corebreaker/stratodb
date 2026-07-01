@@ -606,10 +606,15 @@ mod tests {
                 .is_err()
         );
 
-        // A data entry whose value is not a node.
+        // A data entry whose value is not a node. A distinct, unpopulated key makes
+        // it unambiguous that the rejection is the "data entry is not a node" arm
+        // (which fires before the object-marker idempotent check ever runs, since a
+        // non-`Node` value never builds a `MemNode` to compare against), not the
+        // idempotent no-op that a re-applied `Node::Object` marker on an existing
+        // object would take.
         assert!(
             nodes
-                .put(TableKey::Data(Skey::ROOT), TableValue::Skey(Skey::ROOT))
+                .put(TableKey::Data(skey(1)), TableValue::Skey(Skey::ROOT))
                 .is_err()
         );
 
