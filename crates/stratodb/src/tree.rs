@@ -129,16 +129,24 @@ pub(crate) enum Located {
 /// Walks `path` from the table root, reporting whether it lands on a plain node or
 /// at/inside a packed entity (so the caller can decode that entity's blob and
 /// continue there). A packed entity is detected before descending through it.
+///
+/// Each node along the path is read exactly once: the read that classifies a hop
+/// (packed? terminal?) is the same node the next hop navigates through, so a list
+/// index reuses the list node instead of re-reading it, and the root's existence
+/// check is folded into the first iteration (no separate probe).
 pub(crate) fn locate<B: ReadNodes>(b: &B, path: &SPath) -> SdbResult<Located> {
-    if read_node(b, Skey::ROOT)?.is_none() {
-        return Ok(Located::Missing);
-    }
-
     let segs = path.segments();
     let mut key = Skey::ROOT;
     let mut i = 0;
     loop {
-        if matches!(read_node(b, key)?, Some(Node::Packed { .. })) {
+        // A missing node is only reachable at the root of an empty store (a resolved
+        // child link always points at a live node), so this doubles as the existence
+        // check the old separate root probe did.
+        let Some(node) = read_node(b, key)? else {
+            return Ok(Located::Missing);
+        };
+
+        if matches!(node, Node::Packed { .. }) {
             return Ok(Located::Packed {
                 entity: key,
                 rel:    SPath::from_segments(&segs[i..]),
@@ -149,7 +157,18 @@ pub(crate) fn locate<B: ReadNodes>(b: &B, path: &SPath) -> SdbResult<Located> {
             return Ok(Located::Plain(key));
         }
 
-        match child_key(b, key, &segs[i])? {
+        // Resolve the next hop through the node just read: an object child is a
+        // point lookup on the child-link block (the node is not needed), but a list
+        // index is served straight from this list node rather than re-reading it.
+        let child = match &segs[i] {
+            Segment::Name(name) => object_child(b, key, name)?,
+            Segment::Index(index) => match &node {
+                Node::List(items) => items.get(*index as usize).copied(),
+                _ => None,
+            },
+        };
+
+        match child {
             Some(child) => {
                 key = child;
                 i += 1;
