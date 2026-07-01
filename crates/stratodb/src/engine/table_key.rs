@@ -26,6 +26,8 @@ use std::cmp::Ordering;
 
 mod tag {
     pub(super) const DATA: u8 = 0;
+    /// Object child link: `parent · name`.
+    pub(super) const CHILD: u8 = 1;
     /// Non-unique index entry: `id · cols · entity`.
     pub(super) const INDEX_DUP: u8 = 2;
     /// Unique index entry: `id · cols` (entity is in the value).
@@ -37,6 +39,12 @@ mod tag {
 pub(crate) enum TableKey {
     /// A node, addressed by its primary key.
     Data(Skey),
+    /// An object's child link: the child key under `parent` for field `name`.
+    /// Encoded as `parent(16) · name`, so every child of one parent forms one
+    /// contiguous, name-sorted key block — a child is a point lookup, and a
+    /// parent's whole child set is a single forward range scan. The child key is
+    /// held in the value ([`TableValue::Skey`](crate::engine::TableValue)).
+    Child { parent: Skey, name: String },
     /// An index entry. `cols` is the order-preserving encoding of the indexed
     /// columns; `entity` is `Some` for non-unique indexes (the entity lives in
     /// the key) and `None` for unique ones (the entity is stored in the value).
@@ -48,12 +56,39 @@ pub(crate) enum TableKey {
 }
 
 impl TableKey {
-    fn encode(&self) -> Vec<u8> {
+    /// The leading discriminant byte — the first thing the encoding emits and the
+    /// primary sort key (so `Data` < `Child` < index entries).
+    fn tag(&self) -> u8 {
+        match self {
+            TableKey::Data(_) => tag::DATA,
+            TableKey::Child {
+                ..
+            } => tag::CHILD,
+            TableKey::Index {
+                entity: Some(_), ..
+            } => tag::INDEX_DUP,
+            TableKey::Index {
+                entity: None, ..
+            } => tag::INDEX_UNIQUE,
+        }
+    }
+
+    /// The order-preserving byte encoding (also the engine key). Exposed within
+    /// the crate so the in-memory node backend can key on the same bytes redb does.
+    pub(crate) fn encode(&self) -> Vec<u8> {
         let mut buf = Vec::new();
         match self {
             TableKey::Data(skey) => {
                 buf.push(tag::DATA);
                 buf.extend_from_slice(&skey.into_bytes());
+            }
+            TableKey::Child {
+                parent,
+                name,
+            } => {
+                buf.push(tag::CHILD);
+                buf.extend_from_slice(&parent.into_bytes());
+                buf.extend_from_slice(name.as_bytes());
             }
             TableKey::Index {
                 id,
@@ -78,7 +113,7 @@ impl TableKey {
         buf
     }
 
-    fn decode(data: &[u8]) -> SdbResult<TableKey> {
+    pub(crate) fn decode(data: &[u8]) -> SdbResult<TableKey> {
         let (&tag, rest) = data
             .split_first()
             .ok_or_else(|| SdbError::Corrupt("empty table key".into()))?;
@@ -90,6 +125,23 @@ impl TableKey {
                     .map_err(|_| SdbError::Corrupt("malformed data key".into()))?;
 
                 Ok(TableKey::Data(Skey::from_bytes(bytes)))
+            }
+            tag::CHILD => {
+                // parent(16) · name(var)
+                if rest.len() < 16 {
+                    return Err(SdbError::Corrupt("child key missing parent".into()));
+                }
+
+                let (parent, name) = rest.split_at(16);
+                let parent = Skey::from_bytes(parent.try_into().expect("16 bytes"));
+                let name = std::str::from_utf8(name)
+                    .map_err(|_| SdbError::Corrupt("invalid utf-8 in child link name".into()))?
+                    .to_string();
+
+                Ok(TableKey::Child {
+                    parent,
+                    name,
+                })
             }
             tag::INDEX_DUP => {
                 // id(4) · cols(var) · entity(16)
@@ -171,6 +223,55 @@ impl RedbKey for TableKey {
     }
 }
 
+// Ordering by the order-preserving encoding, matching `RedbKey::compare`, so an
+// in-memory `BTreeMap<TableKey, _>` orders keys exactly as the engine does — but
+// computed directly from the fields, never allocating an encoding (this is on the
+// hot path of every packed-entity decode and navigation).
+impl Ord for TableKey {
+    fn cmp(&self, other: &Self) -> Ordering {
+        // Leading discriminant first: Data(0) < Child(1) < INDEX_DUP(2) < INDEX_UNIQUE(3).
+        self.tag().cmp(&other.tag()).then_with(|| match (self, other) {
+            (TableKey::Data(a), TableKey::Data(b)) => a.into_bytes().cmp(&b.into_bytes()),
+            (
+                TableKey::Child {
+                    parent: pa,
+                    name: na,
+                },
+                TableKey::Child {
+                    parent: pb,
+                    name: nb,
+                },
+            ) => pa
+                .into_bytes()
+                .cmp(&pb.into_bytes())
+                .then_with(|| na.as_bytes().cmp(nb.as_bytes())),
+            (
+                TableKey::Index {
+                    id: ia,
+                    cols: ca,
+                    entity: ea,
+                },
+                TableKey::Index {
+                    id: ib,
+                    cols: cb,
+                    entity: eb,
+                },
+            ) => ia.0.cmp(&ib.0).then_with(|| ca.cmp(cb)).then_with(|| match (ea, eb) {
+                (Some(x), Some(y)) => x.into_bytes().cmp(&y.into_bytes()),
+                _ => Ordering::Equal,
+            }),
+            // Equal tags imply the same variant (the tag distinguishes them).
+            _ => Ordering::Equal,
+        })
+    }
+}
+
+impl PartialOrd for TableKey {
+    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -187,6 +288,14 @@ mod tests {
     #[test]
     fn roundtrips_every_variant() {
         roundtrip(TableKey::Data(skey(7)));
+        roundtrip(TableKey::Child {
+            parent: skey(7),
+            name:   String::from("field"),
+        });
+        roundtrip(TableKey::Child {
+            parent: skey(7),
+            name:   String::new(),
+        });
         roundtrip(TableKey::Index {
             id:     IndexId(3),
             cols:   vec![1, 2, 0, 3],
@@ -211,6 +320,24 @@ mod tests {
         let ordered = [
             TableKey::Data(skey(0)),
             TableKey::Data(skey(u128::MAX)),
+            // Child entries form a contiguous block between data and index keys,
+            // grouped by parent and then sorted by name.
+            TableKey::Child {
+                parent: skey(0),
+                name:   String::new(),
+            },
+            TableKey::Child {
+                parent: skey(0),
+                name:   String::from("age"),
+            },
+            TableKey::Child {
+                parent: skey(0),
+                name:   String::from("name"),
+            },
+            TableKey::Child {
+                parent: skey(1),
+                name:   String::from("age"),
+            },
             TableKey::Index {
                 id:     IndexId(0),
                 cols:   vec![1],

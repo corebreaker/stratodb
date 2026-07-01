@@ -39,6 +39,42 @@ pub(crate) fn delete(data: &mut DataTable<'_>, indexes: &[IndexEntry], scope: &S
     Ok(())
 }
 
+/// Removes every physical entry belonging to `entry`, across all indexed
+/// entities. Call when an index is dropped: its registry record is gone, so its
+/// entries in the data table must go too.
+///
+/// An index's entries occupy one contiguous key block — the same leading
+/// `tag · id`, the `unique` flag fixing the tag — so a single forward range scan
+/// from that id's lower bound, stopping at the first entry with a different id,
+/// covers exactly this index and nothing else (ids are never reused, so no other
+/// index shares one).
+pub(crate) fn delete_all(data: &mut DataTable<'_>, entry: &IndexEntry) -> SdbResult<()> {
+    let id = entry.id();
+    let lower = TableKey::Index {
+        id,
+        cols: Vec::new(),
+        entity: (!entry.def().unique()).then(|| Skey::from_bytes([0x00; 16])),
+    };
+
+    let mut keys = Vec::new();
+    for item in data.range(lower..)? {
+        let (key, _) = item?;
+        let table_key = key.value();
+
+        if !matches!(&table_key, TableKey::Index { id: entry_id, .. } if *entry_id == id) {
+            break;
+        }
+
+        keys.push(table_key);
+    }
+
+    for key in keys {
+        data.remove(&key)?;
+    }
+
+    Ok(())
+}
+
 /// Inserts the index entries the affected entities now imply. Call after applying
 /// a mutation at `scope`. A unique index rejects an entry whose key already maps
 /// to a different entity with [`SdbError::UniqueViolation`].
@@ -50,7 +86,7 @@ pub(crate) fn insert(data: &mut DataTable<'_>, indexes: &[IndexEntry], scope: &S
                 guard_unique(data, &key, &value, entry.def().name())?;
             }
 
-            data.insert(&key, &value)?;
+            data.insert(&key, value.as_ref())?;
         }
     }
 
@@ -67,7 +103,7 @@ fn guard_unique(data: &DataTable<'_>, key: &TableKey, value: &TableValue, index:
     };
 
     if let Some(existing) = data.get(key)?
-        && matches!(existing.value(), TableValue::Skey(other) if other != *entity)
+        && matches!(existing.value().into_owned(), TableValue::Skey(other) if other != *entity)
     {
         return Err(SdbError::UniqueViolation {
             index: index.to_string(),
@@ -123,12 +159,7 @@ fn index_key<T: ReadableTable<TableKey, TableValue>>(
 }
 
 /// The scalar at `column` relative to `entity`, or `Null` when the path is absent
-/// or does not land on a leaf.
+/// or does not land on a leaf. Descends transparently into a packed entity's blob.
 fn column_scalar<T: ReadableTable<TableKey, TableValue>>(t: &T, entity: Skey, column: &SPath) -> SdbResult<Scalar> {
-    let scalar = match tree::resolve_from(t, entity, column)? {
-        Some(key) => tree::leaf_scalar_opt(t, key)?.unwrap_or(Scalar::Null),
-        None => Scalar::Null,
-    };
-
-    Ok(scalar)
+    Ok(tree::entity_leaf(t, entity, column)?.unwrap_or(Scalar::Null))
 }

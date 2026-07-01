@@ -2,20 +2,20 @@
 
 use super::{query::IndexQuery, rooted::RootedRead};
 use crate::{
-    access::{ReadCursor, Reader, Rooted},
+    access::{MemReader, ReadCursor, Reader, Rooted},
     cache::PathCache,
     data::{refs::SRef, SData, SValue, Scalar},
-    engine::{self, TableKey, TableValue},
+    engine::{self, ArchivedNodes, TableKey, TableValue},
     error::{SdbError, SdbResult},
     index::{registry, IndexId, Pattern},
     node::{Node, NodeKind},
     path::{IntoPath, SPath, Segment},
-    tree,
+    tree::{self, Located},
     Skey,
 };
 
 use redb::{ReadOnlyTable, ReadTransaction, TableError};
-use std::{collections::HashSet, sync::Arc};
+use std::{collections::HashSet, sync::Arc, sync::OnceLock};
 
 /// A read-only view of a table at a consistent point in time.
 pub struct ReadTxn {
@@ -23,6 +23,11 @@ pub struct ReadTxn {
     table:      String,
     generation: u64,
     cache:      Arc<PathCache>,
+    /// The opened data table, materialized once and reused for every node read in
+    /// this transaction (redb's `ReadOnlyTable` is independent of the transaction
+    /// borrow). Reopening per read was a measurable cost on multi-field loads and
+    /// index scans. `None` once computed means the table has never been written.
+    data_table: OnceLock<Option<ReadOnlyTable<TableKey, TableValue>>>,
 }
 
 impl ReadTxn {
@@ -32,16 +37,24 @@ impl ReadTxn {
             table,
             generation,
             cache,
+            data_table: OnceLock::new(),
         }
     }
 
-    /// Opens the underlying table, or `None` if it has never been written.
-    pub(super) fn open(&self) -> SdbResult<Option<ReadOnlyTable<TableKey, TableValue>>> {
-        match self.txn.open_table(engine::data_def(&self.table)) {
-            Ok(table) => Ok(Some(table)),
-            Err(TableError::TableDoesNotExist(_)) => Ok(None),
-            Err(error) => Err(error.into()),
+    /// The opened data table, cached for the lifetime of the transaction; `None` if
+    /// it has never been written.
+    pub(crate) fn open(&self) -> SdbResult<Option<&ReadOnlyTable<TableKey, TableValue>>> {
+        if let Some(cached) = self.data_table.get() {
+            return Ok(cached.as_ref());
         }
+
+        let opened = match self.txn.open_table(engine::data_def(&self.table)) {
+            Ok(table) => Some(table),
+            Err(TableError::TableDoesNotExist(_)) => None,
+            Err(error) => return Err(error.into()),
+        };
+
+        Ok(self.data_table.get_or_init(|| opened).as_ref())
     }
 
     /// Reads the value at `path`, decoded as `V`.
@@ -94,24 +107,127 @@ impl ReadTxn {
     }
 
     pub(crate) fn kind_at(&self, path: &SPath) -> SdbResult<Option<NodeKind>> {
-        let Some(key) = self.lookup_path(path)? else {
-            return Ok(None);
-        };
-
-        self.lookup_kind(key)
+        match self.open()? {
+            Some(table) => tree::kind(table, path),
+            None => Ok(None),
+        }
     }
 
     pub(crate) fn fetch_at<'t, A: SRef<'t>>(&'t self, base: &SPath) -> SdbResult<A> {
-        let cursor = ReadCursor::new(self);
-        let key = cursor
-            .resolve(base)?
-            .ok_or_else(|| SdbError::PathNotFound(base.clone()))?;
+        let Some(table) = self.open()? else {
+            return Err(SdbError::PathNotFound(base.clone()));
+        };
 
-        Ok(A::open(Arc::new(cursor), base.clone(), key))
+        match tree::locate(table, base)? {
+            Located::Missing => Err(SdbError::PathNotFound(base.clone())),
+            Located::Plain(_) => {
+                let cursor = ReadCursor::new(self);
+                let key = cursor
+                    .resolve(base)?
+                    .ok_or_else(|| SdbError::PathNotFound(base.clone()))?;
+
+                Ok(A::open(Arc::new(cursor), base.clone(), key))
+            }
+            Located::Packed {
+                entity,
+                rel,
+            } => {
+                let mem = self
+                    .packed_mem(table, entity)?
+                    .ok_or_else(|| SdbError::Corrupt("locate reported a packed entity that is not packed".into()))?;
+                let root =
+                    tree::resolve_from(&*mem, Skey::ROOT, &rel)?.ok_or_else(|| SdbError::PathNotFound(base.clone()))?;
+
+                Ok(A::open(
+                    Arc::new(MemReader::new(mem, root, base.clone())),
+                    base.clone(),
+                    root,
+                ))
+            }
+        }
     }
 
     pub(crate) fn load_at<T: SData>(&self, base: &SPath) -> SdbResult<T> {
-        T::load(&ReadCursor::new(self), base)
+        // Fast path: a cached resolution of `base` to a node key. This covers the
+        // common whole-entity load — `base` lands on a node (plain or a packed
+        // entity) rather than descending into one — and reuses the shared path
+        // cache instead of re-walking the tree on every load. `lookup_path` only
+        // opens the engine table on a cache miss, so a fully warm read (path and
+        // blob both cached) serves the whole load from memory — the table is never
+        // opened, an open redb pays on every read but StratoDB can skip.
+        if let Some(key) = self.lookup_path(base)? {
+            if let Some(mem) = self.cache.get_blob(self.generation, key)? {
+                return T::load(&MemReader::new(mem, Skey::ROOT, SPath::root()), &SPath::root());
+            }
+
+            // Path cached but blob not (or `base` is a plain node): the table is
+            // needed to read — and cache — the entity.
+            let Some(table) = self.open()? else {
+                return Err(SdbError::PathNotFound(base.clone()));
+            };
+
+            return match self.packed_mem(table, key)? {
+                Some(mem) => T::load(&MemReader::new(mem, Skey::ROOT, SPath::root()), &SPath::root()),
+                None => T::load(&ReadCursor::new(self), base),
+            };
+        }
+
+        // `base` did not resolve directly: it is either inside a packed entity (the
+        // walk stops at the entity) or genuinely absent.
+        let Some(table) = self.open()? else {
+            return Err(SdbError::PathNotFound(base.clone()));
+        };
+
+        match tree::locate(table, base)? {
+            // Absent: the path loader applies any field `default` fallback.
+            Located::Missing | Located::Plain(_) => T::load(&ReadCursor::new(self), base),
+            Located::Packed {
+                entity,
+                rel,
+            } => {
+                let mem = self
+                    .packed_mem(table, entity)?
+                    .ok_or_else(|| SdbError::Corrupt("locate reported a packed entity that is not packed".into()))?;
+
+                match tree::resolve_from(&*mem, Skey::ROOT, &rel)? {
+                    Some(root) => T::load(&MemReader::new(mem, root, SPath::root()), &SPath::root()),
+                    None => T::load(&ReadCursor::new(self), base),
+                }
+            }
+        }
+    }
+
+    /// The decoded blob of the packed entity at `key`, served from (and populated
+    /// into) the shared blob cache, or `None` if `key` is not a packed entity.
+    fn packed_mem(
+        &self,
+        table: &ReadOnlyTable<TableKey, TableValue>,
+        key: Skey,
+    ) -> SdbResult<Option<Arc<ArchivedNodes>>> {
+        if let Some(mem) = self.cache.get_blob(self.generation, key)? {
+            return Ok(Some(mem));
+        }
+
+        match tree::read_node(table, key)? {
+            Some(Node::Packed {
+                blob, ..
+            }) => {
+                let mem = Arc::new(ArchivedNodes::new(&blob)?);
+                self.cache.put_blob(self.generation, key, Arc::clone(&mem))?;
+
+                Ok(Some(mem))
+            }
+            _ => Ok(None),
+        }
+    }
+
+    /// Recomposes the entity stored under `entity` as a `T`, decoding it (via the
+    /// blob cache) when it is packed and otherwise re-rooting a plain reader at it.
+    fn load_entity<T: SData>(&self, table: &ReadOnlyTable<TableKey, TableValue>, entity: Skey) -> SdbResult<T> {
+        match self.packed_mem(table, entity)? {
+            Some(mem) => T::load(&MemReader::new(mem, Skey::ROOT, SPath::root()), &SPath::root()),
+            None => T::load(&Rooted::new(&ReadCursor::new(self), entity), &SPath::root()),
+        }
     }
 
     /// Finds the entities an index points at, recomposing each as a `T`.
@@ -172,7 +288,7 @@ impl ReadTxn {
             return Ok(Vec::new());
         };
 
-        let mut entities = scan_prefix(&table, id, &cols, def.unique())?;
+        let mut entities = scan_prefix(table, id, &cols, def.unique())?;
 
         // Restrict to entities at or under `root`. An entity is in scope only if
         // the pattern reaches at least the root's depth; when it does,
@@ -184,7 +300,7 @@ impl ReadTxn {
                 return Ok(Vec::new());
             }
 
-            let under: HashSet<Skey> = pattern.affected_entities(&table, root)?.into_iter().collect();
+            let under: HashSet<Skey> = pattern.affected_entities(table, root)?.into_iter().collect();
             entities.retain(|entity| under.contains(entity));
         }
 
@@ -194,12 +310,11 @@ impl ReadTxn {
             entities.reverse();
         }
 
-        // Each match is addressed by its (stable) key; re-root a reader there so
-        // the path-based loader recomposes the entity from its own subtree.
-        let cursor = ReadCursor::new(self);
+        // Each match is addressed by its (stable) key; recompose it from its own
+        // subtree, decoding the blob in place when the entity is packed.
         entities
             .into_iter()
-            .map(|entity| T::load(&Rooted::new(&cursor, entity), &SPath::root()))
+            .map(|entity| self.load_entity::<T>(table, entity))
             .collect()
     }
 
@@ -215,7 +330,7 @@ impl ReadTxn {
             return Ok(None);
         };
 
-        let resolved = tree::resolve(&table, path)?;
+        let resolved = tree::resolve(table, path)?;
         if let Some(key) = resolved {
             self.cache.put(self.generation, path, key)?;
         }
@@ -223,24 +338,33 @@ impl ReadTxn {
         Ok(resolved)
     }
 
-    /// Reads the scalar at `path` (resolving through the cache); errors if the node
-    /// there is not a leaf.
+    /// Reads the scalar at `path`; errors if the node there is not a leaf.
+    ///
+    /// A field inside a packed entity is served through the shared blob cache and
+    /// navigated zero-copy, so reading one field of a hot entity reuses its already
+    /// decoded archive instead of re-decoding the whole blob — the win over a flat
+    /// value store, which must decode the entire record to reach any single field.
     fn scalar_at_path(&self, path: &SPath) -> SdbResult<Option<Scalar>> {
-        let Some(key) = self.lookup_path(path)? else {
-            return Ok(None);
-        };
         let Some(table) = self.open()? else {
             return Ok(None);
         };
 
-        match tree::read_node(&table, key)? {
-            Some(Node::Leaf(scalar)) => Ok(Some(scalar)),
-            Some(other) => Err(SdbError::UnexpectedNode {
-                path:     path.clone(),
-                expected: "leaf",
-                found:    other.kind().as_str(),
-            }),
-            None => Err(SdbError::Corrupt("path resolves to a missing node".into())),
+        match tree::locate(table, path)? {
+            tree::Located::Missing => Ok(None),
+            tree::Located::Plain(key) => tree::leaf_at(table, key, path),
+            tree::Located::Packed {
+                entity,
+                rel,
+            } => {
+                let mem = self
+                    .packed_mem(table, entity)?
+                    .ok_or_else(|| SdbError::Corrupt("locate reported a packed entity that is not packed".into()))?;
+
+                match tree::resolve_from(&*mem, Skey::ROOT, &rel)? {
+                    Some(key) => tree::leaf_at(&*mem, key, path),
+                    None => Ok(None),
+                }
+            }
         }
     }
 
@@ -249,7 +373,7 @@ impl ReadTxn {
             return Ok(None);
         };
 
-        tree::child_key(&table, parent, seg)
+        tree::child_key(table, parent, seg)
     }
 
     /// Resolves `parent`'s `seg` child, consulting and populating the shared cache
@@ -270,7 +394,7 @@ impl ReadTxn {
             return Ok(None);
         };
 
-        let resolved = tree::child_key(&table, parent, seg)?;
+        let resolved = tree::child_key(table, parent, seg)?;
         if let Some(key) = resolved {
             self.cache.put(self.generation, child_path, key)?;
         }
@@ -283,7 +407,7 @@ impl ReadTxn {
             .open()?
             .ok_or_else(|| SdbError::Corrupt("read on a missing table".into()))?;
 
-        tree::scalar_at(&table, key)
+        tree::scalar_at(table, key)
     }
 
     pub(crate) fn lookup_scalar_at(&self, path: &SPath) -> SdbResult<Option<Scalar>> {
@@ -295,7 +419,7 @@ impl ReadTxn {
             return Ok(None);
         };
 
-        tree::kind_of(&table, key)
+        tree::kind_of(table, key)
     }
 
     pub(crate) fn lookup_len(&self, key: Skey) -> SdbResult<usize> {
@@ -303,7 +427,7 @@ impl ReadTxn {
             .open()?
             .ok_or_else(|| SdbError::Corrupt("read on a missing table".into()))?;
 
-        tree::list_len(&table, key)
+        tree::list_len(table, key)
     }
 
     pub(crate) fn lookup_object_keys(&self, key: Skey) -> SdbResult<Vec<String>> {
@@ -311,7 +435,7 @@ impl ReadTxn {
             .open()?
             .ok_or_else(|| SdbError::Corrupt("read on a missing table".into()))?;
 
-        tree::object_keys(&table, key)
+        tree::object_keys(table, key)
     }
 }
 
@@ -346,7 +470,7 @@ fn scan_prefix(
             } if entry_id == id && cols.starts_with(prefix) => {
                 let entity = match entity {
                     Some(entity) => entity,
-                    None => match value.value() {
+                    None => match value.value().into_owned() {
                         TableValue::Skey(entity) => entity,
                         _ => return Err(SdbError::Corrupt("unique index entry without an entity key".into())),
                     },

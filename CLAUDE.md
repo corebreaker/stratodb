@@ -26,12 +26,13 @@ stratodb/
 │   │   ├── src/
 │   │   ├── tests/
 │   │   ├── examples/           runnable examples (basic.rs, indexed.rs)
+│   │   ├── benches/            criterion benches (common/ fixtures + one file per feature area)
 │   │   └── Cargo.toml
 │   └── stratodb-derive/        proc-macro crate (#[derive(SData)])
 │       └── src/
 ```
 
-The workspace is just the two crates (`members = ["crates/*"]`, no `exclude`). Examples live under `crates/stratodb/examples/` and are declared as `[[example]]` targets in `crates/stratodb/Cargo.toml` (`indexed` carries `required-features = ["derive"]`).
+The workspace is just the two crates (`members = ["crates/*"]`, no `exclude`). Examples live under `crates/stratodb/examples/` and are declared as `[[example]]` targets in `crates/stratodb/Cargo.toml` (`indexed` carries `required-features = ["derive"]`). Benches live under `crates/stratodb/benches/` and are declared as `[[bench]]` targets (`harness = false`, all `required-features = ["derive"]`); `benches/common/mod.rs` is a shared fixtures module (`mod common;` in each bench), not a target.
 
 ---
 
@@ -66,6 +67,18 @@ Examples:
 cargo run -p stratodb --example basic
 cargo run -p stratodb --example indexed --features derive
 ```
+
+Benches (criterion; require `derive` since they use a derived entity):
+
+```sh
+cargo bench -p stratodb --features derive               # all (slim: console + baselines, no HTML/plots)
+cargo bench -p stratodb --features derive --bench reads  # one category
+cargo do bench-reports                                   # full HTML report + SVG plots (see below)
+```
+
+`criterion` is pinned `default-features = false` (only `cargo_bench_support`), so the heavy `plotters`/`rayon`/HTML-report trees are NOT compiled by default — crucially, `--all-features` does NOT pull them either (no package feature references them), so the gate stays slim. The full report is opt-in by enabling criterion's own features **on the command line** (`--features criterion/html_reports,criterion/plotters,criterion/rayon`), wrapped as the `bench-reports` script in `[workspace.metadata.scripts]` (run via `cargo do bench-reports`). Do NOT turn this into a package feature — `--all-features` would then re-pull plotters into the gate.
+
+Note: `cargo test --all-features --all-targets` (the gate's first line) compiles **and runs** the benches once each in criterion's test mode, so a broken bench fails the gate. Keep the fixture sizes (`benches/common`: `DATASET`, `RING`) modest enough that this stays fast.
 
 ---
 
@@ -103,17 +116,40 @@ if it is many words long — do NOT insert manual line breaks within it.
 
 These choices are final and must not be revisited or worked around:
 
-**Storage model — full shredding.** Every scalar value is its own node with its own `Skey`. Paths are never persisted; they resolve by walking the tree from the fixed root key (`Skey::ROOT` = nil UUID). One redb file per `StratoDb`; one engine table per StratoDB table holds both data nodes and index entries (partitioned by a leading discriminant byte). A global reserved `$metadata` table holds the index registry and the format version.
+**Storage model — full shredding.** Every scalar value is its own node with its own `Skey`. Paths are never persisted; they resolve by walking the tree from the fixed root key (`Skey::ROOT` = nil UUID). One redb file per `StratoDb`; one engine table per StratoDB table holds data nodes, **object child links** and index entries (partitioned by a leading discriminant byte — `Data` < `Child` < index). A global reserved `$metadata` table holds the index registry and the format version (now **`2`**).
 
-**Node types:** `Object(BTreeMap<name, Skey>)`, `List(Vec<Skey>)`, `Leaf(Scalar)`. Identity is `Skey` (stable through moves and renames).
+**Node types:** `Object`, `List(Vec<Skey>)`, `Leaf(Scalar)`, `Packed { root, blob }`. Identity is `Skey` (stable through moves and renames). An object node is a **marker** — it carries no inline child map. Its `(name → child key)` links live as separate `TableKey::Child { parent, name } → Skey` entries, so attaching/detaching/looking up one child is a single engine op (point lookup or one insert/remove) and a parent's whole child set is one forward range scan. This replaced the original `Object(BTreeMap<name, Skey>)` blob, whose rewrite-the-whole-map-per-child cost made a wide object O(N) per write and a bulk fill O(N²). A list still holds its element keys inline (`Vec<Skey>`): order is positional and lists are not the wide-fan-out case.
 
-**Per-table LRU path cache.** A `PathCache` (256 k entries, `lru` crate) keyed by `(generation, SPath)` is shared across read transactions on the same table. A `version_lock` + atomic generation counter ensure a snapshot never borrows a resolution from another committed version. `WriteTxn` never uses the cache (it sees uncommitted state); `ReadCursor` is cache-backed, `WriteCursor` uses raw walks.
+**Packed entities (the perf-critical path).** A `store` / `store_value` at a path whose subtree **no index pattern reaches into** writes the whole entity as **one** `Node::Packed` engine value — an **rkyv-archived** mini node-table (`engine/archived.rs`: nodes keyed by their real `Skey`, sorted, children referencing one another by key, leaf scalars in StratoDB's own byte codec). One `store` is one write and one `load` is one read. Reads navigate the archive **zero-copy** through `ArchivedNodes` (validated once, then unchecked `rkyv::access`, binary-searched by key) — no decode into an owned structure — implementing the **same** `ReadNodes` contract, so the same `tree::*` logic drives it. Writes (a `put`/`remove` into a packed entity = read-modify-write; build during `store`) go through `MemNodes`, the mutable in-memory rep (inline-object node map); a `fetch_mut` first *unpacks* the entity (spills it back to shredded nodes), since a write accessor addresses by node key. Every operation is generic over a `ReadNodes`/`WriteNodes` backend that redb, `MemNodes` **and** `ArchivedNodes` all implement, so the node model is reused verbatim across all three. **Packing rule:** `WriteTxn::should_pack(base)` packs unless some index `Pattern::covers_strictly_below(base)` — those children need their own keys, so that subtree stays shredded (and indexes over collection children keep working). **Format `2 → 3 → 4`** (v3 = a hand-coded entry-list blob; v4 = the rkyv archive); no migration (pre-release).
+
+**Hot-path shortcuts on the packed path** (a perf pass — see `support/comparison`):
+- **Overwrite-in-place on replace.** A `store` that replaces an existing packed entity rewrites that one blob at its **existing key** (`tree::write_packed`), not delete-old + fresh-key + relink. One engine write instead of ~four ops, and identity is now stable across an overwriting `store` too. The same reuse is in `store_packed_under` (bulk).
+- **Same-length single-field patch.** A `put` of a scalar into a packed entity whose new encoding is the **same byte length** as the existing leaf splices those bytes straight into the blob (`ArchivedNodes::leaf_byte_span` + `new_unchecked`, no validation) — no decode + re-serialize. Any other case (new field, different length, non-leaf) falls back to the `MemNodes` read-modify-write.
+- **Cached zero-copy scalar reads.** `ReadTxn::get`/`get_scalar` (not just `fetch`/`load`) serve a field inside a packed entity through the blob cache, navigated zero-copy — a warm read never re-decodes the whole blob to reach one field. A fully warm `load` (path **and** blob cached) never even opens the engine table.
+
+**Second perf pass** (same tool; measured breakdown showed the write floor is the shared redb commit, and that reads still copied the whole blob just to classify a node):
+- **No blob copy to classify a node — the big-entity read win.** A path walk (`tree::locate`) needs only a node's *shape* — packed entity (terminal), list (to index), or plain — never its payload. That went through `read_node`, which for a packed entity copied the **entire blob** into an owned `Node` (then threw it away). The data-table value now decodes into a **borrowed** `TableValueRef` (its `Packed` node keeps the blob as a slice into the redb page; list/leaf payloads are `Cow`, borrowed on write and owned on read), and `ReadNodes::node_step` classifies a value by reference. So `locate` — and thus every `get`/`get_scalar` on a packed entity — touches no blob byte. Reading one element of a 10240-element packed list dropped from ~19 µs to ~1.7 µs (now **flat** in list size, ~200× vs redb+bincode's whole-value decode); a 128-field `get_one` dropped ~13%. Node byte-serialization now lives solely at the storage boundary (`engine::table_value` over `NodeRef`); the `node::tag` discriminant constants stay beside `Node` as the shared source of truth. On-disk format unchanged (same `type_name`, same bytes) — no version bump.
+- **Read each node once in `locate`.** Folded the root existence probe into the walk (was a double-read of the root node) and serve a list-index hop from the element keys `node_step` already returned, so a list node is not read twice.
+- **Lighter packed build.** `MemNodes::into_blob` **consumes** the store, moving field names into the archive instead of cloning them; the node map hashes `Skey` keys with a trivial folding hasher (they are already 128 random bits — no SipHash keyed setup). Build-time only, no format change: ~13% off a bulk `store_many`, ~5% off a wide `store`, noise on a small one.
+
+This narrows the gap to a single-blob store (redb/bincode) to roughly parity–2× on the flat-entity ops and ~5-6× on bulk, down from the original 8-5530×. It does **not** beat redb+bincode on a small flat entity's *whole*-value ops: even read zero-copy, a packed entity is a generic node-tree navigated + its scalars materialized, and every write still pays redb's own `begin_write`/`commit` (the measured floor — a small `store` is ~1.5× redb+bincode's, and the residue is the shared commit plus shredding's extra b-tree entries, not removable layer overhead). Where the design **does** win is a **partial** operation on a **wide or list-bearing** entity — reading one field/element without decoding the rest (StratoDB navigates to it zero-copy; a flat store must decode the whole value): the `wide`/`lists` comparison benches show StratoDB pulling far ahead on `get_one`, the gap **widening** with the field/element count (now flat in that size, since classification no longer copies the blob). A partial *write* into a packed entity does **not** win — the packed blob is one value, so any change rewrites it wholesale (O(size)); the partial-write win is the **shredded** regime (an index reaches into the collection), where one element's leaf is rewritten in place.
+
+
+**Per-table LRU path cache.** A `PathCache` (256 k entries, `lru` crate) mapping `SPath → (generation, Skey)` is shared across read transactions on the same table. The generation lives in the **value**, not the key, so a lookup borrows the caller's `&SPath` instead of cloning it on every hot read; a stale-generation hit reads as a miss and is re-resolved under the caller's own snapshot. A `version_lock` + atomic generation counter ensure a snapshot never borrows a resolution from another committed version. `WriteTxn` never uses the cache (it sees uncommitted state); `ReadCursor` is cache-backed, `WriteCursor` uses raw walks.
+
+**Paths are `SmallVec`-backed with `SmolStr` names.** `SPath` holds a `SmallVec<[Segment; 2]>` and `Segment::Name` is a `SmolStr`, so building a short path (the `child_name` every field read/write appends) is heap-free — no `Vec` grow, no `String` alloc. The inline capacity is deliberately small: `SPath` is embedded in `SdbError` (hence in every `SdbResult`), so a fat inline buffer would bloat every result (and trip clippy's `result_large_err`). Deeper paths spill to the heap.
 
 **Engine (redb) is opaque.** No redb type in the public API. No `pub use redb::…` anywhere.
 
-**Index model.** Secondary indexes are named, composite (ordered columns), per-column ASC/DESC, with optional uniqueness. Non-unique: entity in the key (`INDEX_DUP` tag). Unique: entity in the value (`INDEX_UNIQUE` tag); collision = `UniqueViolation`. Scope = path pattern (e.g., `"users/*"`); `*` is a one-segment wildcard. Order-preserving encoding: DESC = bitwise complement; strings use a two-byte `0x00 0x01` terminator (escape `0x00` → `0x00 0xFF`) so encodings are prefix-free.
+**Index model.** Secondary indexes are named, composite (ordered columns), per-column ASC/DESC, with optional uniqueness. Non-unique: entity in the key (`INDEX_DUP` tag). Unique: entity in the value (`INDEX_UNIQUE` tag); collision = `UniqueViolation`. Scope = path pattern (e.g., `"users/*"`); `*` is a one-segment wildcard. Order-preserving encoding: DESC = bitwise complement; strings use a two-byte `0x00 0x01` terminator (escape `0x00` → `0x00 0xFF`) so encodings are prefix-free. Lifecycle: `create_index`/`create_indexes::<T>` register + back-fill (error on a divergent same-name redefinition); `ensure_index`/`ensure_indexes::<T>` are the idempotent-by-name variant (create + back-fill if absent, no-op — no error — if a same-name index already exists, whatever its definition); `index_def`/`has_index` introspect (`has_index` is a name-only registry scan that never materializes an `IndexDef`); `delete_index`/`delete_indexes::<T>` drop, removing the registry record and purging every physical entry in one transaction. Dropping leaves `next_id` untouched — index ids are never reused.
 
-**Write-time index maintenance.** Every mutation goes through `WriteTxn::reindex_around(scope, apply)`: delete affected index entries, apply the mutation, re-insert. The index set is loaded once per transaction into an `OnceLock<Vec<IndexEntry>>` (not `OnceCell` — keeps `WriteTxn: Sync` so `Arc<WriteCursor>` in `fetch_mut` passes clippy `arc_with_non_send_sync`).
+**Write-time index maintenance.** Every mutation goes through `WriteTxn::reindex_around(scope, apply)`: delete affected index entries, apply the mutation, re-insert. The index set is loaded once per transaction into an `OnceLock<Arc<[IndexEntry]>>` (not `OnceCell` — keeps `WriteTxn: Sync` so `Arc<WriteCursor>` in `fetch_mut` passes clippy `arc_with_non_send_sync`). The `Arc` is shared with a **database-wide cache** (`DbInner::cached_indexes`, keyed by an atomic `schema_gen` bumped only by index DDL): a write on an unchanged schema reuses the parsed set without reopening `$metadata` — so an unindexed table pays no `$metadata` open + registry scan per mutation (this was a real per-write cost). Since write transactions are serialized against index DDL, the committed registry is stable while a write runs, so the cached set is valid as long as `schema_gen` has not moved.
+
+**Decoded-blob cache.** Alongside the per-table `PathCache`, a generation-keyed LRU caches each hot entity's `Arc<ArchivedNodes>` (`(generation, Skey) → Arc<ArchivedNodes>`), so a read of a hot entity reuses its aligned, already-validated archive (`MemReader` holds it behind an `Arc`, never cloning). Every packed read path — `load`, `fetch`, `get`, `get_scalar`, index-query recompose — goes through it (`ReadTxn::packed_mem`). Coherent by construction: an entity's blob is immutable within a generation, and a `WriteTxn` never populates the cache (it sees uncommitted state).
+
+**Batch store + optional parallelism.** `WriteTxn::store_many(&[(SPath, &T)])` stores many pairs at once: it resolves each distinct parent only once, writes every packed entity under **one** table handle (no per-entity reopen), and brackets index maintenance per entity. Behind the optional **`parallel`** Cargo feature (`default = []`, pulls `rayon`; off by default so the standard build/gate stay slim — but `--all-features` pulls it, so the gate exercises it), the CPU-bound packing of each entity runs across rayon threads before the (single-threaded) engine writes. The build closure must touch no transaction state (the redb `WriteTransaction` is not `Sync`), so index patterns are read once up front. Note: rayon helps the *build*, not the writes — bulk's residual cost is the sequential engine writes, not the parallelizable packing. (Key generation, once a hot cost here, is now a ~2 ns per-thread PRNG draw; a bulk that *replaces* existing entities overwrites each blob in place — one write per entity, no relink.)
+
+**Batched whole-value store.** A `store` / `store_value` runs the *entire* decomposition inside **one** `reindex_around` bracket and **one** open table handle: it clears the old subtree, resolves the entity's parent once, then drives every field write through a `BoundCursor` (`access/bound.rs`) — a `Reader`/`Writer` over the borrowed table that resolves **relative to the entity anchor** (via the `tree::*_rel` helpers) instead of re-walking from the root and instead of reopening the table + re-running index maintenance per field. The `BoundCursor` is used only for the additive phase (after the clear), so it never touches the path cache or does its own index maintenance. Single-field `put` / accessor mutations still use the per-call `WriteCursor`.
 
 **Accessor GATs.** `SData::Ref<'t>: SRef<'t>`, `SData::Mut<'t>: SMut<'t>`. Keys are **eager and infallible** — resolved at accessor construction; reading a scalar is `acc.x()?.get()?`. Accessors hold `Arc<dyn Reader/Writer + 't>` (type-erased, cheap to clone).
 
@@ -132,16 +168,20 @@ src/
 ├── datetime.rs
 ├── cache.rs                PathCache (LRU, per-table, shared across read txns)
 ├── db/                     StratoDb (database.rs); DbInner (inner.rs: generation, version_lock, caches)
-├── key.rs                  Skey (opaque 16-byte UUIDv7 primary key)
-├── node/                   NodeKind (kind.rs) + Node Object/List/Leaf + encoding (definition.rs)
-├── table.rs                Table handle → read()/write()/create_index()
-├── tree.rs                 tree walk, node resolution, list helpers
+├── key.rs                  Skey (opaque 16-byte primary key; 128 random bits from a fast per-thread splitmix64 PRNG — not time-ordered, since keys are only point-looked-up)
+├── node/                   NodeKind (kind.rs) + Node Object(marker)/List/Leaf + encoding (definition.rs)
+├── table.rs                Table handle → read()/write()/create_index(es)/ensure_index(es)/index_def/has_index/delete_index(es)
+├── tree.rs                 tree walk, node resolution, list helpers (generic over a node backend); locate (plain vs packed), pack/unpack
 ├── value.rs                Value enum — dynamic Leaf/List/Node tree + get_value/set_value/subtree
 ├── codec/                  byte encoding (putters, reader)
-├── engine/                 redb table defs, META_TABLE, TableKey/TableValue encoding
+├── engine/                 redb table defs, META_TABLE, TableKey (Data/Child/Index) / TableValue encoding
+│   ├── backend.rs          ReadNodes/WriteNodes traits (redb table + in-memory MemNodes, inline-object rep + alloc-free child_link); MemNodes ↔ blob
+│   └── archived.rs         ArchTree/ArchNode (rkyv) + ArchivedNodes — zero-copy read backend over a packed entity's archive
 ├── access/
 │   ├── reader.rs           ReadCursor + Reader trait (get_node, child_cached, object_keys…)
 │   ├── writer.rs           WriteCursor + Writer trait (put_node, ensure_container…)
+│   ├── bound.rs            BoundCursor<B> (Reader/Writer over one backend, anchored at a key — batched/packed store)
+│   ├── mem.rs              MemReader (Reader over a decoded packed entity's MemNodes, re-based at the accessor path)
 │   └── rooted.rs           Rooted<R> adapter (re-roots SData::load at an entity key)
 ├── data/
 │   ├── definition.rs       SData trait (store/load)
@@ -163,12 +203,12 @@ src/
 │   └── tail.rs             PathTail trait + / and /= operators on SPath
 ├── index/
 │   ├── definitions/        IndexDef, IndexColumn, Direction
-│   ├── registry/           $metadata registry (create/lookup/list by table)
+│   ├── registry/           $metadata registry (create/lookup/list/has/delete by table; has = name-only scan, no IndexDef materialized)
 │   ├── id.rs               IndexId
 │   ├── indexed.rs          SIndexed trait
 │   ├── ordered.rs          order-preserving Scalar codec (incl. bignum: length-prefixed int, decimal-float, continued-fraction rational)
 │   ├── pattern.rs          Pattern (*-wildcard) + affected_entities(scope)
-│   └── maintenance.rs      delete + insert (bracket every mutation)
+│   └── maintenance.rs      delete + insert (bracket every mutation); delete_all (purge every entry of one index when dropped)
 ├── export/                 JSON/YAML rendering of a Value (the JsonExporter/YamlExporter traits)
 │   ├── exporter.rs         JsonExporter/YamlExporter traits + impls for ReadTxn and Value
 │   ├── json.rs             to_json(&Value, indent) — compact / pretty
@@ -234,22 +274,36 @@ Generated code is fully `::stratodb::`-qualified (no import assumptions; trait m
 
 ## Test suite
 
-| File | Feature gate | What it covers |
-|------|-------------|----------------|
-| `tests/foundation.rs` | — | put/get, node kinds, cascade delete, persist/reopen |
-| `tests/typed.rs` | — | hand-written SData + accessor contract (reference for derive output) |
-| `tests/containers.rs` | — | Vec/Option/BTreeMap/Bytes roundtrips + accessor API |
-| `tests/rooted.rs` | — | RootedRead/RootedWrite, relative paths, scoped index queries |
-| `tests/indexes.rs` | — | index registry, maintenance, query builder, unique enforcement |
-| `tests/export.rs` | — | JSON/YAML export of stored subtrees (compact/pretty/block, scalar rendering, missing path, scalar & list roots) |
-| `tests/value.rs` | — | dynamic `Value`: `store_value`/`load_value` round-trips, `get_value`/`set_value`, `Value`'s own `JsonExporter`/`YamlExporter` |
-| `tests/derive.rs` | `derive` | #[derive(SData)]: structs/enums + every `#[strato(...)]` attr (rename/skip/default/with, from/into/try_from, enum reps, generics+bound, flatten) |
-| `tests/index_typed.rs` | `derive` | end-to-end derived indexes (back-fill, composite prefix, unique, reopen) |
+| File                     | Feature gate          | What it covers                                                                                                                                                                                                                                                       |
+|--------------------------|-----------------------|----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
+| `tests/foundation.rs`    | —                     | put/get, node kinds, cascade delete, persist/reopen                                                                                                                                                                                                                  |
+| `tests/typed.rs`         | —                     | hand-written SData + accessor contract (reference for derive output)                                                                                                                                                                                                 |
+| `tests/containers.rs`    | —                     | Vec/Option/BTreeMap/Bytes roundtrips + accessor API                                                                                                                                                                                                                  |
+| `tests/rooted.rs`        | —                     | RootedRead/RootedWrite, relative paths, scoped index queries                                                                                                                                                                                                         |
+| `tests/indexes.rs`       | —                     | index registry, maintenance, query builder, unique enforcement, `ensure_index` (create-if-absent, no-op on present/divergent), `has_index`/`delete_index` (registry purge + physical entries, idempotent, other indexes & data intact, recreate, reopen)             |
+| `tests/export.rs`        | —                     | JSON/YAML export of stored subtrees (compact/pretty/block, scalar rendering, missing path, scalar & list roots)                                                                                                                                                      |
+| `tests/value.rs`         | —                     | dynamic `Value`: `store_value`/`load_value` round-trips, `get_value`/`set_value`, `Value`'s own `JsonExporter`/`YamlExporter`                                                                                                                                        |
+| `tests/derive.rs`        | `derive`              | #[derive(SData)]: structs/enums + every `#[strato(...)]` attr (rename/skip/default/with, from/into/try_from, enum reps, generics+bound, flatten)                                                                                                                     |
+| `tests/index_typed.rs`   | `derive`              | end-to-end derived indexes (back-fill, composite prefix, unique, reopen) + `ensure_indexes::<T>()` (creates missing, skips present, idempotent) + `delete_indexes::<T>()` (drops every declared index, returns the count, idempotent)                                |
 | `tests/cross_feature.rs` | `derive` (+ `bignum`) | feature seams together: a derived+renamed entity with an enum field, indexed (unique + non-unique), exported to JSON/YAML, round-tripped through `Value`; a `#[cfg(feature = "bignum")]` module covers a BigInt index ordering by value and bignum scalars exporting |
 
 Big-number coverage lives in `src` unit tests, not a `tests/` file: `data/scalar.rs` (storage round-trips), `index/ordered.rs` (value ordering), and `data/bignum.rs` (as-data round-trips via an in-memory DB, gated on a `*-as-data`-only combo).
 
 The export writers also carry `src` unit tests: `export/scalar.rs` (each `Scalar`'s text form), `export/json.rs` / `export/yaml.rs` (layout + escaping on hand-built `Value`s), and `export/base64.rs` (RFC 4648 vectors).
+
+### Benchmark suite
+
+Criterion benches under `benches/` (all `required-features = ["derive"]`), one file per feature area. Most share the `benches/common` fixtures (a flat `User` entity with one unique + one non-unique index; `populated()` and the `Ring` working set); `lists.rs` defines its own list-bearing entity.
+
+| Bench              | What it measures                                                                                        |
+|--------------------|---------------------------------------------------------------------------------------------------------|
+| `reads.rs`         | scalar read, scalar read + presence test, full `load`, single field via the zero-copy accessor          |
+| `writes.rs`        | `store` a whole entity, `put` a single leaf                                                             |
+| `modifications.rs` | the three update paths — accessor in-place (zero-copy `SMut`), `put` by path, `SData` load/update/store |
+| `deletes.rs`       | cascading entity removal (un-indexed and indexed), via `iter_batched` so only the delete is timed       |
+| `indexes.rs`       | indexed `find`/reverse `query`, indexed store/update/remove maintenance, `create_index` back-fill       |
+| `dynamic_value.rs` | `Value` load/store, in-memory `get_value`/`set_value`, JSON (compact/pretty) + YAML export              |
+| `lists.rs`         | a list-bearing entity (a `Vec` field of `N` elements): whole `store`/`load`, `read_element` (one element), and `update_element` under both regimes — **packed** (blob rewrite) and **shredded** (an index reaching into the elements makes each its own node, so the update touches one leaf) |
 
 ---
 
@@ -257,14 +311,14 @@ The export writers also carry `src` unit tests: `export/scalar.rs` (each `Scalar
 
 ### COMPLETE
 
-| Milestone | Description |
-|-----------|-------------|
-| 1 | Foundation: StratoDb, Table, ReadTxn, WriteTxn, SPath, Skey, Node, tree walk, path cache |
-| 2 | SData trait + accessors: SValue/Scalar, Leaf/LeafMut, Vec/Option/BTreeMap/Bytes containers, #[derive(SData)] for structs and enums, StratoXxxDesc |
-| 3 | Secondary indexes: order-preserving codec, IndexDef + registry, maintenance, pattern matching, query builder, unique enforcement, #[strato(index(...))] derive attr, back-fill |
-| derive-attrs | Serde-style `#[strato(...)]` attributes — 7 phases (detailed below) |
-| bignum | Optional BigInt / BigFloat / BigRational as `Scalar`/`SValue`/`SData` + order-preserving index codecs (detailed below) |
-| export + Value | Hand-rolled (zero-dep) JSON/YAML export via the `JsonExporter`/`YamlExporter` traits + a dynamic `Value` document type with load/store and path get/set (detailed below) |
+| Milestone      | Description                                                                                                                                                                    |
+|----------------|--------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
+| 1              | Foundation: StratoDb, Table, ReadTxn, WriteTxn, SPath, Skey, Node, tree walk, path cache                                                                                       |
+| 2              | SData trait + accessors: SValue/Scalar, Leaf/LeafMut, Vec/Option/BTreeMap/Bytes containers, #[derive(SData)] for structs and enums, StratoXxxDesc                              |
+| 3              | Secondary indexes: order-preserving codec, IndexDef + registry, maintenance, pattern matching, query builder, unique enforcement, #[strato(index(...))] derive attr, back-fill |
+| derive-attrs   | Serde-style `#[strato(...)]` attributes — 7 phases (detailed below)                                                                                                            |
+| bignum         | Optional BigInt / BigFloat / BigRational as `Scalar`/`SValue`/`SData` + order-preserving index codecs (detailed below)                                                         |
+| export + Value | Hand-rolled (zero-dep) JSON/YAML export via the `JsonExporter`/`YamlExporter` traits + a dynamic `Value` document type with load/store and path get/set (detailed below)       |
 
 Milestone 3 extras (same branch): rooted views (`RootedRead`/`RootedWrite`), `SPath` normalization + `/` operator.
 
@@ -274,15 +328,15 @@ Serde-style `#[strato(...)]` attributes on `#[derive(SData)]` (namespace **`stra
 
 **Phases (all DONE, one tested commit each):**
 
-| Phase | Attributes |
-|-------|-----------|
-| 1 | `rename` / `rename_all` (8 Serde casings) / `alias` |
-| 2 | `skip` / `skip_store` / `skip_load` / `skip_store_if` / `default` |
-| 3 | `store_with` / `load_with` / `with` |
-| 4 | `from` / `into` / `try_from` (container-level: the type is stored AS a target `U`, accessors delegate to `U`'s; a failed `try_from` → `SdbError::Conversion`) |
-| 5 | enum reps: `tag` (internally) / `tag`+`content` (adjacently) / `untagged` / `other` catch-all; enum `rename_all`, variant `rename`/`alias`; `expecting` |
-| 6 | generics + `bound` (single override, not a load/store split — there is one `SData` impl) |
-| 7 | `flatten` |
+| Phase  | Attributes                                                                                                                                                    |
+|--------|---------------------------------------------------------------------------------------------------------------------------------------------------------------|
+| 1      | `rename` / `rename_all` (8 Serde casings) / `alias`                                                                                                           |
+| 2      | `skip` / `skip_store` / `skip_load` / `skip_store_if` / `default`                                                                                             |
+| 3      | `store_with` / `load_with` / `with`                                                                                                                           |
+| 4      | `from` / `into` / `try_from` (container-level: the type is stored AS a target `U`, accessors delegate to `U`'s; a failed `try_from` → `SdbError::Conversion`) |
+| 5      | enum reps: `tag` (internally) / `tag`+`content` (adjacently) / `untagged` / `other` catch-all; enum `rename_all`, variant `rename`/`alias`; `expecting`       |
+| 6      | generics + `bound` (single override, not a load/store split — there is one `SData` impl)                                                                      |
+| 7      | `flatten`                                                                                                                                                     |
 
 **Key implementation facts:**
 - Effective stored name = `rename` > `rename_all(ident)` > the Rust ident; it drives store/load, accessor child-navigation and `Desc::FIELDS`. Getter method names stay the Rust idents.
@@ -301,12 +355,12 @@ Serde-style `#[strato(...)]` attributes on `#[derive(SData)]` (namespace **`stra
 
 Optional support for `num_bigint::BigInt`, `num_bigfloat::BigFloat` (a fixed 40-digit **decimal** float), and `num_rational::BigRational`, behind a feature matrix (`default = []`). Each type has two orthogonal axes — **`-as-scalar`** (native `Scalar` variant + `SValue`) and **`-as-data`** (`SData` impl) — with umbrellas rolling them up:
 
-| Feature | Pulls in | Effect |
-|---------|----------|--------|
-| `bigint-as-scalar` / `bigfloat-as-scalar` / `rational-as-scalar` | the matching `num-*` crate | a `Scalar` variant + `SValue` impl |
-| `bigint-as-data` / `bigfloat-as-data` / `rational-as-data` | the matching `num-*` crate | an `SData` impl |
-| `bignum-as-scalar` / `bignum-as-data` | the three above, respectively | — |
-| `bignum` | both umbrellas | everything |
+| Feature                                                          | Pulls in                      | Effect                             |
+|------------------------------------------------------------------|-------------------------------|------------------------------------|
+| `bigint-as-scalar` / `bigfloat-as-scalar` / `rational-as-scalar` | the matching `num-*` crate    | a `Scalar` variant + `SValue` impl |
+| `bigint-as-data` / `bigfloat-as-data` / `rational-as-data`       | the matching `num-*` crate    | an `SData` impl                    |
+| `bignum-as-scalar` / `bignum-as-data`                            | the three above, respectively | —                                  |
+| `bignum`                                                         | both umbrellas                | everything                         |
 
 `rational-as-scalar` and `rational-as-data` also pull in `num-bigint` — a rational is (de)serialised through its `BigInt` numerator/denominator.
 

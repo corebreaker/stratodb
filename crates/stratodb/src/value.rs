@@ -270,11 +270,11 @@ fn set_in(target: &mut Value, segments: &[Segment], value: Value) -> bool {
     };
 
     match (target, first) {
-        (Value::Node(map), Segment::Name(name)) => match map.get_mut(name) {
+        (Value::Node(map), Segment::Name(name)) => match map.get_mut(name.as_str()) {
             Some(child) => set_in(child, rest, value),
             None => match build_fresh(rest, value) {
                 Some(subtree) => {
-                    map.insert(name.clone(), subtree);
+                    map.insert(name.to_string(), subtree);
 
                     true
                 }
@@ -314,7 +314,7 @@ fn build_fresh(segments: &[Segment], value: Value) -> Option<Value> {
     match first {
         Segment::Name(name) => {
             let mut map = BTreeMap::new();
-            map.insert(name.clone(), build_fresh(rest, value)?);
+            map.insert(name.to_string(), build_fresh(rest, value)?);
 
             Some(Value::Node(map))
         }

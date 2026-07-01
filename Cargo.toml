@@ -3,7 +3,7 @@ resolver = "3"
 members = ["crates/*"]
 
 [workspace.package]
-version = "0.1.0"
+version = "1.0.0"
 edition = "2024"
 license = "MIT"
 repository = "https://github.com/corebreaker/stratodb"
@@ -11,6 +11,8 @@ repository = "https://github.com/corebreaker/stratodb"
 [workspace.metadata.scripts]
 fmt = "cargo +nightly fmt --all"
 gc = "cargo sweep -r -t 10 ."
+bench = "cargo bench -p stratodb --features derive"
+bench-reports = "cargo bench -p stratodb --features derive --features criterion/html_reports,criterion/plotters,criterion/rayon"
 
 [workspace.dependencies]
-stratodb-derive = { path = "crates/stratodb-derive", version = "0.1" }
+stratodb-derive = { path = "crates/stratodb-derive", version = "1.0" }

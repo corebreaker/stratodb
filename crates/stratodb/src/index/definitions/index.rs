@@ -2,17 +2,19 @@ use super::{misc::read_string, Direction, IndexColumn};
 use crate::{
     codec::{self, Reader},
     data::Scalar,
-    error::SdbResult,
+    error::{SdbError, SdbResult},
     index::ordered,
     path::SPath,
 };
 
 /// A secondary index definition.
 ///
-/// `pattern` selects which entities to index — a path pattern, e.g. `users/*`
-/// (matching is added in a later milestone-3 step). `columns` form the sort key,
-/// each a path relative to a matched entity, in priority order. A `unique` index
-/// rejects a second entity that produces the same column tuple.
+/// `pattern` is a path pattern selecting which nodes are indexed *entities*: a
+/// slash-separated path where `*` matches any single child and every other
+/// segment matches literally (e.g. `users/*` indexes every direct child of
+/// `users`; the empty string `""` indexes the table root). `columns` form the
+/// sort key, each a path relative to a matched entity, in priority order. A
+/// `unique` index rejects a second entity that produces the same column tuple.
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub struct IndexDef {
     /// The index name (unique per table).
@@ -46,6 +48,27 @@ impl IndexDef {
             codec::put_bytes(buf, column.path().to_string().as_bytes());
             buf.push(column.direction().to_byte());
         }
+    }
+
+    /// Reads only the **name** of an encoded definition, advancing `r` past the
+    /// whole record. The registry's presence check (`registry::has`) needs the
+    /// name alone, so this skips the pattern, uniqueness flag and columns rather
+    /// than materializing an [`IndexDef`] (notably, it never parses an [`SPath`]
+    /// per column). Returns a borrow into `r`'s buffer — no allocation.
+    pub(crate) fn decode_name<'a>(r: &mut Reader<'a>) -> SdbResult<&'a str> {
+        let name = std::str::from_utf8(r.bytes()?)
+            .map_err(|_| SdbError::Corrupt("invalid utf-8 in index definition".into()))?;
+
+        let _pattern = r.bytes()?;
+        let _unique = r.u8()?;
+
+        let count = r.u32()?;
+        for _ in 0..count {
+            let _path = r.bytes()?;
+            let _direction = r.u8()?;
+        }
+
+        Ok(name)
     }
 
     /// Decodes a definition written by [`IndexDef::encode`].

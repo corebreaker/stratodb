@@ -1,4 +1,8 @@
-use super::{functions::parse_token, segment::Segment, PathTail};
+use super::{
+    functions::parse_token,
+    segment::{Segment, Segments},
+    PathTail,
+};
 use crate::error::{SdbError, SdbResult};
 use std::{
     fmt::{Debug, Display, Formatter, Result as FmtResult},
@@ -9,14 +13,14 @@ use std::{
 /// A parsed strato-path identifying a node in a table's tree.
 #[derive(Clone, PartialEq, Eq, Hash, Default)]
 pub struct SPath {
-    segments: Vec<Segment>,
+    segments: Segments,
 }
 
 impl SPath {
     /// The root path (empty), identifying the whole table tree.
     pub fn root() -> Self {
         Self {
-            segments: Vec::new()
+            segments: Segments::new(),
         }
     }
 
@@ -57,7 +61,7 @@ impl SPath {
             ".." => {
                 self.segments.pop();
             }
-            name => self.segments.push(Segment::Name(name.to_string())),
+            name => self.segments.push(Segment::Name(name.into())),
         }
     }
 
@@ -81,7 +85,7 @@ impl SPath {
     }
 
     pub fn inplace_join(&mut self, tail: &SPath) {
-        self.segments.extend_from_slice(&tail.segments);
+        self.segments.extend(tail.segments.iter().cloned());
     }
 
     /// Returns this path followed by `tail`'s segments — `tail` resolved relative
@@ -89,10 +93,18 @@ impl SPath {
     /// segments unambiguous, since they attach to a name without a separator.
     pub fn join(&self, tail: &SPath) -> Self {
         let mut segments = self.segments.clone();
-        segments.extend_from_slice(&tail.segments);
+        segments.extend(tail.segments.iter().cloned());
 
         SPath {
             segments,
+        }
+    }
+
+    /// Builds a path from a slice of segments (used to carry the remainder of a
+    /// path that descends into a packed entity).
+    pub(crate) fn from_segments(segments: &[Segment]) -> Self {
+        SPath {
+            segments: segments.iter().cloned().collect(),
         }
     }
 
@@ -102,7 +114,7 @@ impl SPath {
             None
         } else {
             Some(SPath {
-                segments: self.segments[..self.segments.len() - 1].to_vec(),
+                segments: self.segments[..self.segments.len() - 1].iter().cloned().collect(),
             })
         }
     }
@@ -112,7 +124,7 @@ impl SPath {
         self.segments.split_last().map(|(last, head)| {
             (
                 SPath {
-                    segments: head.to_vec(),
+                    segments: head.iter().cloned().collect(),
                 },
                 last,
             )
@@ -162,7 +174,7 @@ impl FromStr for SPath {
             return Ok(SPath::root());
         }
 
-        let mut segments = Vec::new();
+        let mut segments = Segments::new();
         for token in s.split('/') {
             match token {
                 "" => return Err(SdbError::InvalidPath(format!("empty segment in '{s}'"))),

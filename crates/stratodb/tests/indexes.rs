@@ -412,6 +412,195 @@ fn create_index_backfills_existing_data() {
 }
 
 #[test]
+fn has_index_reports_presence_scoped_per_table() {
+    let db = StratoDb::create_in_memory().unwrap();
+    let users = db.open_table("users").unwrap();
+
+    assert!(!users.has_index("by_age").unwrap());
+
+    users.create_index(&single("by_age", "age", false)).unwrap();
+    assert!(users.has_index("by_age").unwrap());
+    assert!(!users.has_index("missing").unwrap());
+
+    // Like `index_def`, presence is per table.
+    assert!(!db.open_table("posts").unwrap().has_index("by_age").unwrap());
+}
+
+#[test]
+fn delete_index_removes_registration_and_clears_queries() {
+    let db = StratoDb::create_in_memory().unwrap();
+    let users = db.open_table("users").unwrap();
+    users.create_index(&single("by_age", "age", false)).unwrap();
+
+    let w = users.write().unwrap();
+    w.put("users/alice/age", &30i32).unwrap();
+    w.put("users/bob/age", &30i32).unwrap();
+    w.commit().unwrap();
+    assert_eq!(count_at(&db, "users", "by_age", 30), 2);
+
+    // Dropping it reports success and clears every trace from the registry.
+    assert!(users.delete_index("by_age").unwrap());
+    assert!(!users.has_index("by_age").unwrap());
+    assert!(users.index_def("by_age").unwrap().is_none());
+
+    // The index no longer resolves: a query against it errors.
+    let err = users
+        .read()
+        .unwrap()
+        .find::<BTreeMap<String, i32>>("by_age", &[Scalar::I32(30)])
+        .unwrap_err();
+    assert!(matches!(err, SdbError::IndexNotFound { .. }), "got {err:?}");
+
+    // The indexed data itself is untouched.
+    assert_eq!(users.read().unwrap().get::<i32>("users/alice/age").unwrap(), Some(30));
+
+    // Dropping a missing index is a no-op (idempotent).
+    assert!(!users.delete_index("by_age").unwrap());
+}
+
+#[test]
+fn delete_index_leaves_other_indexes_and_data_intact() {
+    let db = StratoDb::create_in_memory().unwrap();
+    let users = db.open_table("users").unwrap();
+
+    // Two indexes over a uniform (all-i32) entity, so `find` recomposes cleanly.
+    users.create_index(&single("by_age", "age", false)).unwrap();
+    users.create_index(&single("by_rank", "rank", false)).unwrap();
+
+    let w = users.write().unwrap();
+    w.put("users/alice/age", &30i32).unwrap();
+    w.put("users/alice/rank", &1i32).unwrap();
+    w.put("users/bob/age", &30i32).unwrap();
+    w.put("users/bob/rank", &2i32).unwrap();
+    w.commit().unwrap();
+
+    // Drop only `by_age`; its purge must not touch `by_rank`'s entries or any node.
+    assert!(users.delete_index("by_age").unwrap());
+
+    let r = users.read().unwrap();
+    assert!(matches!(
+        r.find::<BTreeMap<String, i32>>("by_age", &[Scalar::I32(30)])
+            .unwrap_err(),
+        SdbError::IndexNotFound { .. }
+    ));
+
+    // The surviving index still resolves each entity by its distinct rank.
+    assert_eq!(
+        r.find::<BTreeMap<String, i32>>("by_rank", &[Scalar::I32(1)])
+            .unwrap()
+            .len(),
+        1
+    );
+    assert_eq!(
+        r.find::<BTreeMap<String, i32>>("by_rank", &[Scalar::I32(2)])
+            .unwrap()
+            .len(),
+        1
+    );
+
+    // Nodes are intact.
+    assert_eq!(r.get::<i32>("users/bob/age").unwrap(), Some(30));
+}
+
+#[test]
+fn delete_index_then_recreate_rebuilds_without_stale_entries() {
+    let db = StratoDb::create_in_memory().unwrap();
+    let users = db.open_table("users").unwrap();
+    users.create_index(&single("by_age", "age", false)).unwrap();
+
+    let w = users.write().unwrap();
+    w.put("users/alice/age", &30i32).unwrap();
+    w.put("users/bob/age", &30i32).unwrap();
+    w.commit().unwrap();
+
+    users.delete_index("by_age").unwrap();
+
+    // A fresh index under the same name back-fills cleanly: exactly two hits, not
+    // doubled by entries the drop should have purged.
+    users.create_index(&single("by_age", "age", false)).unwrap();
+    assert_eq!(count_at(&db, "users", "by_age", 30), 2);
+}
+
+#[test]
+fn dropping_a_unique_index_frees_its_collisions() {
+    let db = StratoDb::create_in_memory().unwrap();
+    let users = db.open_table("users").unwrap();
+    users.create_index(&single("uby_age", "age", true)).unwrap();
+
+    let w = users.write().unwrap();
+    w.put("users/alice/age", &30i32).unwrap();
+    w.commit().unwrap();
+
+    // While the unique index stands, a colliding value is rejected.
+    let w = users.write().unwrap();
+    assert!(matches!(
+        w.put("users/bob/age", &30i32).unwrap_err(),
+        SdbError::UniqueViolation { .. }
+    ));
+    drop(w);
+
+    // Dropping the index lifts the constraint: the duplicate now stores fine.
+    assert!(users.delete_index("uby_age").unwrap());
+
+    let w = users.write().unwrap();
+    w.put("users/bob/age", &30i32).unwrap();
+    w.commit().unwrap();
+    assert_eq!(users.read().unwrap().get::<i32>("users/bob/age").unwrap(), Some(30));
+}
+
+#[test]
+fn deleted_index_stays_gone_after_reopen() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("idx_delete_reopen.stratodb");
+
+    {
+        let db = StratoDb::create(&path).unwrap();
+        let users = db.open_table("users").unwrap();
+        users.create_index(&def("by_age_name", false)).unwrap();
+        assert!(users.delete_index("by_age_name").unwrap());
+    }
+
+    let db = StratoDb::open(&path).unwrap();
+    assert!(!db.open_table("users").unwrap().has_index("by_age_name").unwrap());
+}
+
+#[test]
+fn ensure_index_creates_when_absent_and_is_a_noop_when_present() {
+    let db = StratoDb::create_in_memory().unwrap();
+    let users = db.open_table("users").unwrap();
+
+    // Data exists before the index.
+    let w = users.write().unwrap();
+    w.put("users/alice/age", &30i32).unwrap();
+    w.put("users/bob/age", &30i32).unwrap();
+    w.commit().unwrap();
+
+    // Absent -> created and back-filled, exactly like `create_index`.
+    users.ensure_index(&single("by_age", "age", false)).unwrap();
+    assert!(users.has_index("by_age").unwrap());
+    assert_eq!(count_at(&db, "users", "by_age", 30), 2);
+
+    // Present (identical) -> no error, no second back-fill.
+    users.ensure_index(&single("by_age", "age", false)).unwrap();
+    assert_eq!(count_at(&db, "users", "by_age", 30), 2);
+}
+
+#[test]
+fn ensure_index_leaves_a_divergent_existing_index_untouched() {
+    let db = StratoDb::create_in_memory().unwrap();
+    let users = db.open_table("users").unwrap();
+
+    users.create_index(&def("by_age_name", false)).unwrap();
+
+    // A divergent definition under the same name: `create_index` would error,
+    // but `ensure_index` quietly leaves the original in place (no reconciliation).
+    users.ensure_index(&def("by_age_name", true)).unwrap(); // unique flag flipped
+    users.ensure_index(&single("by_age_name", "age", false)).unwrap(); // different columns
+
+    assert_eq!(users.index_def("by_age_name").unwrap(), Some(def("by_age_name", false)));
+}
+
+#[test]
 fn creating_a_unique_index_over_duplicates_is_rejected() {
     let db = StratoDb::create_in_memory().unwrap();
     let users = db.open_table("users").unwrap();

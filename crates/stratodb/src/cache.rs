@@ -1,36 +1,73 @@
-//! A bounded LRU cache mapping resolved paths to primary keys.
+//! Bounded LRU caches mapping resolved paths to primary keys, and packed-entity
+//! keys to their decoded blobs.
 //!
-//! A `SPath -> Skey` mapping is only valid for one committed database version, so
-//! entries are keyed by `(generation, path)`. A write commit bumps the generation
-//! (see [`crate::db`]); stale entries are then simply never looked up again and
-//! are LRU-evicted — they are never served for the wrong snapshot.
+//! Both mappings are only valid for one committed database version, so entries
+//! are keyed by `(generation, …)`. A write commit bumps the generation (see
+//! [`crate::db`]); stale entries are then simply never looked up again and are
+//! LRU-evicted — they are never served for the wrong snapshot. (A packed entity's
+//! blob is immutable within a generation: any edit replaces the entity under a
+//! fresh key or rewrites it behind a generation bump.)
 
-use crate::{path::SPath, SdbError, SdbResult, Skey};
+use crate::{engine::ArchivedNodes, path::SPath, SdbError, SdbResult, Skey};
 use lru::LruCache;
-use std::{num::NonZeroUsize, sync::Mutex};
+use std::{num::NonZeroUsize, sync::Arc, sync::Mutex};
 
-/// A thread-safe, bounded `(generation, SPath) -> Skey` cache held by a table and
-/// shared by all of that table's transactions.
+/// A thread-safe, bounded set of per-table caches shared by all of that table's
+/// transactions: `SPath -> (generation, Skey)` path resolutions and
+/// `(generation, Skey) -> MemNodes` decoded packed-entity blobs.
+///
+/// The path cache stores the resolving generation in the *value*, not the key, so
+/// a lookup borrows the caller's `&SPath` directly instead of cloning it into a
+/// composite key on every hot-path read; a stale-generation hit reads as a miss
+/// and is re-resolved (and overwritten) under the caller's own snapshot.
 pub(crate) struct PathCache {
-    entries: Mutex<LruCache<(u64, SPath), Skey>>,
+    entries: Mutex<LruCache<SPath, (u64, Skey)>>,
+    blobs:   Mutex<LruCache<(u64, Skey), Arc<ArchivedNodes>>>,
 }
 
 impl PathCache {
-    /// Creates a cache holding at most `capacity` entries.
+    /// Creates caches holding at most `capacity` path entries and `blob_capacity`
+    /// decoded blobs.
     ///
-    /// `capacity == 0` is coerced up to 1 rather than rejected: an `LruCache`
+    /// A zero capacity is coerced up to 1 rather than rejected: an `LruCache`
     /// requires a `NonZeroUsize`, and a one-entry cache is a harmless, valid
     /// (if pointless) configuration — not a condition worth erroring or
     /// asserting on.
-    pub(crate) fn new(capacity: usize) -> Self {
+    pub(crate) fn new(capacity: usize, blob_capacity: usize) -> Self {
         let capacity = NonZeroUsize::new(capacity).unwrap_or(NonZeroUsize::MIN);
+        let blob_capacity = NonZeroUsize::new(blob_capacity).unwrap_or(NonZeroUsize::MIN);
 
         Self {
             entries: Mutex::new(LruCache::new(capacity)),
+            blobs:   Mutex::new(LruCache::new(blob_capacity)),
         }
     }
 
-    /// Returns the cached key for `path` at `generation`, if present.
+    /// Returns the cached decoded blob for `key` at `generation`, if present.
+    pub(crate) fn get_blob(&self, generation: u64, key: Skey) -> SdbResult<Option<Arc<ArchivedNodes>>> {
+        let blob = self
+            .blobs
+            .lock()
+            .map_err(|err| SdbError::CannotAccess(format!("blob cache mutex poisoned while getting: {err}")))?
+            .get(&(generation, key))
+            .cloned();
+
+        Ok(blob)
+    }
+
+    /// Records that `key` decodes to `blob` at `generation`.
+    pub(crate) fn put_blob(&self, generation: u64, key: Skey, blob: Arc<ArchivedNodes>) -> SdbResult<()> {
+        self.blobs
+            .lock()
+            .map_err(|err| SdbError::CannotAccess(format!("blob cache mutex poisoned while putting: {err}")))?
+            .put((generation, key), blob);
+
+        Ok(())
+    }
+
+    /// Returns the cached key for `path` at `generation`, if present. A hit tagged
+    /// with another generation is treated as a miss (the resolution belongs to a
+    /// different committed version).
     pub(crate) fn get(&self, generation: u64, path: &SPath) -> SdbResult<Option<Skey>> {
         let key = self
             .entries
@@ -40,8 +77,8 @@ impl PathCache {
 
                 SdbError::CannotAccess(msg)
             })?
-            .get(&(generation, path.clone()))
-            .copied();
+            .get(path)
+            .and_then(|(tagged, key)| (*tagged == generation).then_some(*key));
 
         Ok(key)
     }
@@ -55,7 +92,7 @@ impl PathCache {
 
                 SdbError::CannotAccess(msg)
             })?
-            .put((generation, path.clone()), key);
+            .put(path.clone(), (generation, key));
 
         Ok(())
     }

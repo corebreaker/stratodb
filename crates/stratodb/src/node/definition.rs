@@ -1,92 +1,54 @@
 use super::NodeKind;
-use crate::{
-    codec::{self, Reader},
-    error::{SdbError, SdbResult},
-    data::Scalar,
-    Skey,
-};
+use crate::{data::Scalar, Skey};
 
-use std::collections::BTreeMap;
-
-mod tag {
-    pub(super) const OBJECT: u8 = 0;
-    pub(super) const LIST: u8 = 1;
-    pub(super) const LEAF: u8 = 2;
+// The on-disk node discriminant. A node's byte (de)serialization lives at the
+// storage boundary (`engine::table_value`, which decodes a packed blob by
+// reference rather than copying it); these constants are its single source of
+// truth, kept beside the `Node` type they tag.
+pub(crate) mod tag {
+    pub(crate) const OBJECT: u8 = 0;
+    pub(crate) const LIST: u8 = 1;
+    pub(crate) const LEAF: u8 = 2;
+    pub(crate) const PACKED: u8 = 3;
 }
 
-/// A stored node: either a container (object/list) of child keys, or a leaf.
+/// A stored node: either a container (object/list), a leaf, or a packed entity.
+///
+/// An object node carries no inline child map: its `(name -> child key)` links
+/// are stored as separate [`TableKey::Child`](crate::engine::TableKey) entries so
+/// that attaching, detaching and looking up a single child cost one engine
+/// operation instead of rewriting the whole map (which made a wide object O(N) per
+/// child write, hence O(N²) to fill). A list still holds its element keys inline:
+/// element order is positional and lists are not the wide-fan-out case.
+///
+/// A `Packed` node holds a whole entity subtree serialized into one engine value
+/// (a mini node-table — see [`crate::engine::backend`]). One `store` writes it as
+/// a single entry and one `load` reads it back, so whole-entity I/O is one engine
+/// operation instead of one per shredded node. Its children are addressed *inside*
+/// the blob; the table only sees the packed entity as a single keyed node.
 #[derive(Clone, Debug)]
 pub(crate) enum Node {
-    /// An object: an ordered map from field name to child key.
-    Object(BTreeMap<String, Skey>),
+    /// An object marker. Its children live in separate child-link entries.
+    Object,
     /// A list: a zero-based sequence of child keys.
     List(Vec<Skey>),
     /// A leaf: a single scalar value.
     Leaf(Scalar),
+    /// A packed entity subtree: the root node's kind plus the serialized mini
+    /// node-table holding the whole subtree.
+    Packed { root: NodeKind, blob: Vec<u8> },
 }
 
 impl Node {
     pub(crate) fn kind(&self) -> NodeKind {
         match self {
-            Node::Object(_) => NodeKind::Object,
+            Node::Object => NodeKind::Object,
             Node::List(_) => NodeKind::List,
             Node::Leaf(_) => NodeKind::Leaf,
-        }
-    }
-
-    pub(crate) fn encode(&self, buf: &mut Vec<u8>) {
-        match self {
-            Node::Object(map) => {
-                buf.push(tag::OBJECT);
-                codec::put_u32(buf, map.len() as u32);
-
-                for (name, key) in map {
-                    codec::put_bytes(buf, name.as_bytes());
-                    buf.extend_from_slice(&key.into_bytes());
-                }
-            }
-            Node::List(items) => {
-                buf.push(tag::LIST);
-                codec::put_u32(buf, items.len() as u32);
-
-                for key in items {
-                    buf.extend_from_slice(&key.into_bytes());
-                }
-            }
-            Node::Leaf(scalar) => {
-                buf.push(tag::LEAF);
-                scalar.encode(buf);
-            }
-        }
-    }
-
-    pub(crate) fn decode(r: &mut Reader<'_>) -> SdbResult<Node> {
-        match r.u8()? {
-            tag::OBJECT => {
-                let count = r.u32()? as usize;
-                let mut map = BTreeMap::new();
-                for _ in 0..count {
-                    let name_bytes = r.bytes()?;
-                    let name = std::str::from_utf8(name_bytes)
-                        .map_err(|_| SdbError::Corrupt("invalid utf-8 in object field".into()))?
-                        .to_string();
-                    let key = Skey::from_bytes(r.array()?);
-                    map.insert(name, key);
-                }
-
-                Ok(Node::Object(map))
-            }
-            tag::LIST => {
-                let count = r.u32()? as usize;
-                let mut items = Vec::with_capacity(count);
-                for _ in 0..count {
-                    items.push(Skey::from_bytes(r.array()?));
-                }
-
-                Ok(Node::List(items))
-            }
-            tag::LEAF => Ok(Node::Leaf(Scalar::decode(r)?)),
-            other => Err(SdbError::Corrupt(format!("unknown node tag {other}"))),
+            // A packed entity reports the kind of its subtree root.
+            Node::Packed {
+                root, ..
+            } => *root,
         }
     }
 }

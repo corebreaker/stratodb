@@ -79,17 +79,14 @@ impl<'t, T: SData> Map<'t, T> {
 
         Ok(self
             .reader
-            .child_cached(self.key, &Segment::Name(key.to_string()), &at)?
+            .child_cached(self.key, &Segment::Name(key.into()), &at)?
             .is_some())
     }
 
     /// A read accessor over the value for `key`, or `None` if absent.
     pub fn get(&self, key: &str) -> SdbResult<Option<T::Ref<'t>>> {
         let at = self.base.child_name(key);
-        let Some(child) = self
-            .reader
-            .child_cached(self.key, &Segment::Name(key.to_string()), &at)?
-        else {
+        let Some(child) = self.reader.child_cached(self.key, &Segment::Name(key.into()), &at)? else {
             return Ok(None);
         };
 
@@ -114,7 +111,7 @@ impl<'t, T: SData> Map<'t, T> {
         Ok(names.into_iter().map(move |name| {
             let at = base.child_name(name.as_str());
             let child = reader
-                .child_cached(key, &Segment::Name(name.clone()), &at)?
+                .child_cached(key, &Segment::Name(name.as_str().into()), &at)?
                 .ok_or_else(|| SdbError::PathNotFound(at.clone()))?;
 
             Ok((name, <T::Ref<'t> as SRef<'t>>::open(Arc::clone(&reader), at, child)))
@@ -188,17 +185,14 @@ impl<'t, T: SData> MapMut<'t, T> {
 
         Ok(self
             .writer
-            .child_cached(self.key, &Segment::Name(key.to_string()), &at)?
+            .child_cached(self.key, &Segment::Name(key.into()), &at)?
             .is_some())
     }
 
     /// A write accessor over the value for `key`, or `None` if absent.
     pub fn get(&self, key: &str) -> SdbResult<Option<T::Mut<'t>>> {
         let at = self.base.child_name(key);
-        let Some(child) = self
-            .writer
-            .child_cached(self.key, &Segment::Name(key.to_string()), &at)?
-        else {
+        let Some(child) = self.writer.child_cached(self.key, &Segment::Name(key.into()), &at)? else {
             return Ok(None);
         };
 
@@ -235,7 +229,7 @@ impl<'t, T: SData> MapMut<'t, T> {
         Ok(names.into_iter().map(move |name| {
             let at = base.child_name(name.as_str());
             let child = writer
-                .child_cached(key, &Segment::Name(name.clone()), &at)?
+                .child_cached(key, &Segment::Name(name.as_str().into()), &at)?
                 .ok_or_else(|| SdbError::PathNotFound(at.clone()))?;
 
             Ok((name, <T::Mut<'t> as SMut<'t>>::open(Arc::clone(&writer), at, child)))
