@@ -329,3 +329,253 @@ impl Default for Value {
         Value::Leaf(Scalar::Null)
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn leaf(n: i64) -> Value {
+        Value::new_leaf(Scalar::I64(n))
+    }
+
+    #[test]
+    fn constructors_build_the_expected_shapes() {
+        assert_eq!(Value::new_leaf(Scalar::Bool(true)), Value::Leaf(Scalar::Bool(true)));
+        assert_eq!(Value::new_empty_list(), Value::List(vec![]));
+        assert_eq!(Value::new_empty_node(), Value::Node(BTreeMap::new()));
+        assert_eq!(Value::new_list(vec![leaf(1)]), Value::List(vec![leaf(1)]));
+
+        let mut map = BTreeMap::new();
+        map.insert(String::from("a"), leaf(1));
+
+        assert_eq!(Value::new_node(map.clone()), Value::Node(map));
+    }
+
+    #[test]
+    fn default_is_a_null_leaf() {
+        assert_eq!(Value::default(), Value::Leaf(Scalar::Null));
+    }
+
+    #[test]
+    fn typed_accessors_match_only_their_own_kind() {
+        let mut lf = leaf(7);
+        let mut ls = Value::new_list(vec![leaf(1)]);
+        let mut nd = Value::new_empty_node();
+        nd.insert(String::from("k"), leaf(2));
+
+        assert_eq!(lf.leaf(), Some(&Scalar::I64(7)));
+        assert!(ls.leaf().is_none());
+        assert!(lf.leaf_mut().is_some());
+        assert!(nd.leaf_mut().is_none());
+
+        assert_eq!(ls.list().map(<[Value]>::len), Some(1));
+        assert!(lf.list().is_none());
+        assert!(ls.list_mut().is_some());
+        assert!(lf.list_mut().is_none());
+
+        assert_eq!(nd.node().map(BTreeMap::len), Some(1));
+        assert!(lf.node().is_none());
+        assert!(nd.node_mut().is_some());
+        assert!(lf.node_mut().is_none());
+    }
+
+    #[test]
+    fn indexed_and_keyed_access() {
+        let ls = Value::new_list(vec![leaf(10), leaf(20)]);
+        assert_eq!(ls.at(1), Some(&Value::Leaf(Scalar::I64(20))));
+        assert!(ls.at(2).is_none());
+        assert!(leaf(0).at(0).is_none());
+
+        let mut ls = ls;
+        *ls.at_mut(0).unwrap() = leaf(99);
+        assert_eq!(ls.at(0), Some(&leaf(99)));
+        assert!(ls.at_mut(9).is_none());
+        assert!(leaf(0).at_mut(0).is_none());
+
+        let mut nd = Value::new_empty_node();
+        nd.insert(String::from("x"), leaf(5));
+        assert!(nd.contains_key("x"));
+        assert!(!nd.contains_key("y"));
+        assert!(!leaf(0).contains_key("x"));
+
+        assert_eq!(nd.get("x"), Some(&leaf(5)));
+        assert!(nd.get("y").is_none());
+        assert!(leaf(0).get("x").is_none());
+
+        *nd.get_mut("x").unwrap() = leaf(6);
+        assert_eq!(nd.get("x"), Some(&leaf(6)));
+        assert!(nd.get_mut("y").is_none());
+        assert!(leaf(0).get_mut("x").is_none());
+    }
+
+    #[test]
+    fn clear_empties_each_kind_keeping_it() {
+        let mut lf = leaf(3);
+        lf.clear();
+        assert_eq!(lf, Value::Leaf(Scalar::Null));
+
+        let mut ls = Value::new_list(vec![leaf(1), leaf(2)]);
+        ls.clear();
+        assert_eq!(ls, Value::new_empty_list());
+
+        let mut nd = Value::new_empty_node();
+        nd.insert(String::from("k"), leaf(1));
+        nd.clear();
+        assert_eq!(nd, Value::new_empty_node());
+    }
+
+    #[test]
+    fn push_insert_remove_are_kind_gated_no_ops() {
+        let mut ls = Value::new_empty_list();
+        ls.push(leaf(1));
+        assert_eq!(ls.list().map(<[Value]>::len), Some(1));
+
+        // No-op on the wrong kind.
+        let mut lf = leaf(0);
+        lf.push(leaf(2));
+        assert_eq!(lf, leaf(0));
+
+        let mut nd = Value::new_empty_node();
+        nd.insert(String::from("a"), leaf(1));
+        assert!(nd.contains_key("a"));
+
+        lf.insert(String::from("a"), leaf(1));
+        assert_eq!(lf, leaf(0));
+
+        ls.remove_at(0);
+        assert_eq!(ls, Value::new_empty_list());
+        lf.remove_at(0); // no-op on a leaf
+
+        nd.remove_key("a");
+        assert!(!nd.contains_key("a"));
+        lf.remove_key("a"); // no-op on a leaf
+        assert_eq!(lf, leaf(0));
+    }
+
+    #[test]
+    fn merge_by_kind() {
+        // Leaf is replaced wholesale.
+        let mut lf = leaf(1);
+        lf.merge(Value::new_list(vec![leaf(2)]));
+        assert_eq!(lf, Value::new_list(vec![leaf(2)]));
+
+        // List extends with another list, or pushes a non-list.
+        let mut ls = Value::new_list(vec![leaf(1)]);
+        ls.merge(Value::new_list(vec![leaf(2), leaf(3)]));
+        assert_eq!(ls.list().map(<[Value]>::len), Some(3));
+        ls.merge(leaf(4));
+        assert_eq!(ls.list().map(<[Value]>::len), Some(4));
+
+        // Node extends with another node, or is replaced by a non-node.
+        let mut a = Value::new_empty_node();
+        a.insert(String::from("x"), leaf(1));
+        let mut b = Value::new_empty_node();
+        b.insert(String::from("x"), leaf(9));
+        b.insert(String::from("y"), leaf(2));
+        a.merge(b);
+        assert_eq!(a.get("x"), Some(&leaf(9)));
+        assert_eq!(a.get("y"), Some(&leaf(2)));
+
+        a.merge(leaf(0));
+        assert_eq!(a, leaf(0));
+    }
+
+    #[test]
+    fn get_value_navigates_clones_and_rejects_bad_paths() {
+        let mut root = Value::new_empty_node();
+        root.set_value("a/b", leaf(42));
+
+        assert_eq!(root.get_value("a/b"), Some(leaf(42)));
+        assert_eq!(root.get_value(""), Some(root.clone()));
+        assert!(root.get_value("a/missing").is_none());
+        assert!(root.get_value("a/b/c").is_none()); // through a leaf
+
+        let ls = Value::new_list(vec![leaf(1), leaf(2)]);
+        assert_eq!(ls.get_value("[1]"), Some(leaf(2)));
+        assert!(ls.get_value("[5]").is_none());
+    }
+
+    #[test]
+    fn set_value_creates_containers() {
+        let mut root = Value::new_empty_node();
+
+        assert!(root.set_value("a/b/c", leaf(1)));
+        assert_eq!(root.get_value("a/b/c"), Some(leaf(1)));
+
+        // A fresh list only accepts index 0.
+        let mut n = Value::new_empty_node();
+        assert!(n.set_value("list[0]", leaf(7)));
+        assert_eq!(n.get_value("list[0]"), Some(leaf(7)));
+
+        let mut n2 = Value::new_empty_node();
+        assert!(!n2.set_value("list[1]", leaf(7)));
+        assert_eq!(n2, Value::new_empty_node());
+    }
+
+    #[test]
+    fn set_value_appends_at_the_list_end_but_not_past_it() {
+        let mut root = Value::new_empty_node();
+        root.set_value("xs[0]", leaf(1));
+
+        assert!(root.set_value("xs[1]", leaf(2))); // append at end
+        assert_eq!(root.get_value("xs[1]"), Some(leaf(2)));
+
+        assert!(!root.set_value("xs[5]", leaf(9))); // past the end
+        assert_eq!(root.get_value("xs[5]"), None);
+    }
+
+    #[test]
+    fn set_value_never_destroys_a_leaf_mid_path() {
+        let mut root = Value::new_empty_node();
+        root.set_value("a", leaf(1));
+
+        // "a" is a leaf; descending through it must fail and change nothing.
+        assert!(!root.set_value("a/b", leaf(2)));
+        assert_eq!(root.get_value("a"), Some(leaf(1)));
+
+        // Wrong container kind: indexing into a node, naming into a list.
+        assert!(!root.set_value("a[0]", leaf(3)));
+        assert_eq!(root.get_value("a"), Some(leaf(1)));
+    }
+
+    #[test]
+    fn set_value_at_root_replaces_everything() {
+        let mut root = Value::new_empty_node();
+        root.set_value("a", leaf(1));
+
+        assert!(root.set_value("", leaf(0)));
+        assert_eq!(root, leaf(0));
+    }
+
+    #[test]
+    fn set_value_rejects_an_unparsable_path() {
+        let mut root = Value::new_empty_node();
+        assert!(!root.set_value("a[", leaf(1)));
+    }
+
+    #[test]
+    fn set_value_replaces_the_destination_leaf() {
+        let mut root = Value::new_empty_node();
+        root.set_value("a", leaf(1));
+
+        assert!(root.set_value("a", leaf(2)));
+        assert_eq!(root.get_value("a"), Some(leaf(2)));
+    }
+
+    #[test]
+    fn set_value_descends_into_and_guards_list_elements() {
+        let mut root = Value::new_empty_node();
+
+        // Seed a one-element list whose element is an object.
+        assert!(root.set_value("xs[0]/inner", leaf(1)));
+        // Descend into the existing element to add a sibling field.
+        assert!(root.set_value("xs[0]/other", leaf(2)));
+        assert_eq!(root.get_value("xs[0]/inner"), Some(leaf(1)));
+        assert_eq!(root.get_value("xs[0]/other"), Some(leaf(2)));
+
+        // Appending at the list end with an unbuildable remainder (a non-zero index
+        // into a fresh list) fails without mutating.
+        assert!(!root.set_value("xs[1][5]", leaf(3)));
+        assert_eq!(root.get_value("xs[1]"), None);
+    }
+}

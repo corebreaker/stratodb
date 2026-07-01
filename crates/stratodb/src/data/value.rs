@@ -208,3 +208,60 @@ scalar_sdata!(num_bigfloat::BigFloat);
 
 #[cfg(all(feature = "rational-as-scalar", feature = "rational-as-data"))]
 scalar_sdata!(num_rational::BigRational);
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn scalar_is_its_own_svalue() {
+        let scalar = Scalar::I32(5);
+
+        assert_eq!(scalar.to_scalar(), scalar);
+        assert_eq!(Scalar::from_scalar(&scalar).unwrap(), scalar);
+    }
+
+    #[test]
+    fn platform_widths_normalise_to_fixed_widths() {
+        assert_eq!(7usize.to_scalar(), Scalar::U64(7));
+        assert_eq!(usize::from_scalar(&Scalar::U64(7)).unwrap(), 7);
+        assert!(matches!(
+            usize::from_scalar(&Scalar::I32(1)),
+            Err(SdbError::TypeMismatch { .. })
+        ));
+
+        assert_eq!((-7isize).to_scalar(), Scalar::I64(-7));
+        assert_eq!(isize::from_scalar(&Scalar::I64(-7)).unwrap(), -7);
+        assert!(matches!(
+            isize::from_scalar(&Scalar::U8(1)),
+            Err(SdbError::TypeMismatch { .. })
+        ));
+    }
+
+    #[test]
+    fn skey_reads_from_several_scalar_flavours() {
+        let key = Skey::from(0x1234u128);
+
+        assert_eq!(key.to_scalar(), Scalar::Uuid(key.into()));
+        assert_eq!(Skey::from_scalar(&Scalar::Uuid(key.into())).unwrap(), key);
+        assert_eq!(Skey::from_scalar(&Scalar::Null).unwrap(), Skey::ROOT);
+        assert_eq!(
+            Skey::from_scalar(&Scalar::Bytes(key.into_bytes().to_vec())).unwrap(),
+            key
+        );
+        assert_eq!(Skey::from_scalar(&Scalar::U128(0x1234)).unwrap(), key);
+        assert!(matches!(
+            Skey::from_scalar(&Scalar::Bool(true)),
+            Err(SdbError::TypeMismatch { .. })
+        ));
+    }
+
+    #[test]
+    fn option_maps_none_to_null_and_back() {
+        assert_eq!(Some(3i32).to_scalar(), Scalar::I32(3));
+        assert_eq!(Option::<i32>::None.to_scalar(), Scalar::Null);
+
+        assert_eq!(Option::<i32>::from_scalar(&Scalar::Null).unwrap(), None);
+        assert_eq!(Option::<i32>::from_scalar(&Scalar::I32(3)).unwrap(), Some(3));
+    }
+}

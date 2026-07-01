@@ -51,3 +51,27 @@ impl SData for Bytes {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn to_and_from_scalar() {
+        let bytes = Bytes(vec![1, 2, 3]);
+
+        assert_eq!(bytes.to_scalar(), Scalar::Bytes(vec![1, 2, 3]));
+        assert_eq!(Bytes::from_scalar(&Scalar::Bytes(vec![1, 2, 3])).unwrap(), bytes);
+    }
+
+    #[test]
+    fn from_scalar_rejects_a_non_bytes_scalar() {
+        assert!(matches!(
+            Bytes::from_scalar(&Scalar::I32(1)),
+            Err(SdbError::TypeMismatch {
+                expected: "bytes",
+                ..
+            })
+        ));
+    }
+}

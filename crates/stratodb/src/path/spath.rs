@@ -312,6 +312,41 @@ mod tests {
     }
 
     #[test]
+    fn last_and_parent() {
+        let p = SPath::parse("a/b[3]").unwrap();
+
+        assert_eq!(p.last(), Some(&Segment::Index(3)));
+        assert_eq!(p.parent().unwrap().to_string(), "a/b");
+        assert!(SPath::root().last().is_none());
+        assert!(SPath::root().parent().is_none());
+    }
+
+    #[test]
+    fn debug_shows_the_path_string() {
+        let p = SPath::parse("a/b[0]").unwrap();
+
+        assert_eq!(format!("{p:?}"), "SPath(\"a/b[0]\")");
+    }
+
+    #[test]
+    fn div_assign_through_a_mutable_reference() {
+        let mut p = SPath::parse("a").unwrap();
+        let mut r = &mut p;
+        r /= "b";
+        r /= SPath::parse("c[1]").unwrap();
+
+        assert_eq!(p.to_string(), "a/b/c[1]");
+    }
+
+    #[test]
+    fn parse_rejects_reserved_characters_and_stray_indices() {
+        // A `]` (or `/`, `[`) inside a name is reserved.
+        assert!(SPath::parse("a]b").is_err());
+        // Text after a closed index must start a new bracketed index.
+        assert!(SPath::parse("a[0]x").is_err());
+    }
+
+    #[test]
     fn div_operator_appends_names_and_paths() {
         let base = SPath::parse("users").unwrap();
 

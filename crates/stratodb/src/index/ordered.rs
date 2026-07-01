@@ -415,12 +415,16 @@ mod tests {
         ]);
         assert_ordered(&[Scalar::I128(i128::MIN), Scalar::I128(0), Scalar::I128(i128::MAX)]);
         assert_ordered(&[Scalar::I8(i8::MIN), Scalar::I8(0), Scalar::I8(i8::MAX)]);
+        assert_ordered(&[Scalar::I16(i16::MIN), Scalar::I16(0), Scalar::I16(i16::MAX)]);
     }
 
     #[test]
     fn unsigned_integers_order() {
         assert_ordered(&[Scalar::U64(0), Scalar::U64(1), Scalar::U64(u64::MAX)]);
         assert_ordered(&[Scalar::U8(0), Scalar::U8(128), Scalar::U8(u8::MAX)]);
+        assert_ordered(&[Scalar::U16(0), Scalar::U16(1), Scalar::U16(u16::MAX)]);
+        assert_ordered(&[Scalar::U32(0), Scalar::U32(1), Scalar::U32(u32::MAX)]);
+        assert_ordered(&[Scalar::U128(0), Scalar::U128(1), Scalar::U128(u128::MAX)]);
     }
 
     #[test]
@@ -592,6 +596,9 @@ mod tests {
             Scalar::BigFloat(bf("1000")),
             Scalar::BigFloat(INF_POS),
         ]);
+
+        // NaN is parked out of the value order under its own class tag.
+        assert_eq!(asc(&Scalar::BigFloat(num_bigfloat::NAN)), vec![tag::BIG_FLOAT_NAN]);
     }
 
     #[cfg(feature = "rational-as-scalar")]

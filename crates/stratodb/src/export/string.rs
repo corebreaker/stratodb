@@ -22,3 +22,32 @@ pub(super) fn quote(out: &mut String, s: &str) {
 
     out.push('"');
 }
+
+#[cfg(test)]
+mod tests {
+    use super::quote;
+
+    fn quoted(s: &str) -> String {
+        let mut out = String::new();
+        quote(&mut out, s);
+
+        out
+    }
+
+    #[test]
+    fn escapes_the_json_subset() {
+        assert_eq!(quoted("a\"b"), "\"a\\\"b\"");
+        assert_eq!(quoted("a\\b"), "\"a\\\\b\"");
+        assert_eq!(quoted("a\nb"), "\"a\\nb\"");
+        assert_eq!(quoted("a\rb"), "\"a\\rb\"");
+        assert_eq!(quoted("a\tb"), "\"a\\tb\"");
+        assert_eq!(quoted("a\u{08}b"), "\"a\\bb\"");
+        assert_eq!(quoted("a\u{0C}b"), "\"a\\fb\"");
+    }
+
+    #[test]
+    fn other_control_characters_become_unicode_escapes() {
+        assert_eq!(quoted("\u{01}"), "\"\\u0001\"");
+        assert_eq!(quoted("plain"), "\"plain\"");
+    }
+}

@@ -91,3 +91,61 @@ impl<R: Reader> Reader for Rooted<'_, R> {
         self.inner.object_keys(key)
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{access::ReadCursor, StratoDb};
+
+    fn path(s: &str) -> SPath {
+        SPath::parse(s).unwrap()
+    }
+
+    #[test]
+    fn re_roots_reads_at_an_inner_node() {
+        let db = StratoDb::create_in_memory().unwrap();
+        let table = db.open_table("t").unwrap();
+
+        let w = table.write().unwrap();
+        w.put("users/alice/age", &30i32).unwrap();
+        w.put("users/alice/tags[0]", &1i32).unwrap();
+        w.put("users/alice/tags[1]", &2i32).unwrap();
+        w.commit().unwrap();
+
+        let txn = table.read().unwrap();
+        let cursor = ReadCursor::new(&txn);
+        let alice = cursor.resolve(&path("users/alice")).unwrap().unwrap();
+
+        let rooted = Rooted::new(&cursor, alice);
+
+        // Path reads resolve relative to `alice` (walking one and several segments).
+        let age = rooted.resolve(&path("age")).unwrap().unwrap();
+        assert!(rooted.resolve(&path("tags[1]")).unwrap().is_some());
+        assert!(rooted.resolve(&path("missing")).unwrap().is_none());
+        assert_eq!(rooted.scalar_at(&path("age")).unwrap(), Some(Scalar::I32(30)));
+
+        // Key-addressed reads pass straight through to the inner reader.
+        assert_eq!(rooted.scalar(age).unwrap(), Scalar::I32(30));
+        assert_eq!(rooted.kind(age).unwrap(), Some(NodeKind::Leaf));
+        assert!(rooted.child(alice, &Segment::Name("age".into())).unwrap().is_some());
+        assert!(
+            rooted
+                .child_cached(alice, &Segment::Name("age".into()), &SPath::root())
+                .unwrap()
+                .is_some()
+        );
+        assert_eq!(
+            rooted.object_keys(alice).unwrap(),
+            vec![String::from("age"), String::from("tags")]
+        );
+
+        let tags = rooted.resolve(&path("tags")).unwrap().unwrap();
+        assert_eq!(rooted.len(tags).unwrap(), 2);
+
+        // A path landing on a non-leaf (the re-rooted node itself) is the wrong kind.
+        assert!(matches!(
+            rooted.scalar_at(&SPath::root()),
+            Err(SdbError::UnexpectedNode { .. })
+        ));
+    }
+}

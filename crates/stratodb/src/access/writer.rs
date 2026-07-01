@@ -280,3 +280,72 @@ impl Writer for WriteCursor<'_> {
         self.txn.clear_children_at(path, key)
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::StratoDb;
+
+    fn p(s: &str) -> SPath {
+        SPath::parse(s).unwrap()
+    }
+
+    // `W` is opaque, so calls dispatch through `<W as Writer>` / `<W as Reader>`.
+    // Passing an `Arc`/`Box<dyn Writer>` exercises the forwarding impls (both the
+    // `Reader` and the `Writer` halves) that a direct pointer call would deref past.
+    fn exercise<W: Writer>(writer: &W) {
+        writer.put_scalar(&p("k"), Scalar::I32(1)).unwrap();
+        writer.ensure_container(&p("obj"), false).unwrap();
+        writer.ensure_container(&p("list"), true).unwrap();
+        writer.put_scalar(&p("list[0]"), Scalar::I32(10)).unwrap();
+        writer.put_scalar(&p("list[1]"), Scalar::I32(20)).unwrap();
+
+        // Reader half (available because `Writer: Reader`).
+        let obj = writer.resolve(&p("obj")).unwrap().unwrap();
+        let list = writer.resolve(&p("list")).unwrap().unwrap();
+        let k = writer.resolve(&p("k")).unwrap().unwrap();
+        assert!(writer.child(obj, &Segment::Name("z".into())).unwrap().is_none());
+        assert!(
+            writer
+                .child_cached(obj, &Segment::Name("z".into()), &p("obj/z"))
+                .unwrap()
+                .is_none()
+        );
+        assert_eq!(writer.kind(obj).unwrap(), Some(NodeKind::Object));
+        assert_eq!(writer.len(list).unwrap(), 2);
+        assert!(writer.object_keys(obj).unwrap().is_empty());
+        assert_eq!(writer.scalar_at(&p("k")).unwrap(), Some(Scalar::I32(1)));
+        assert_eq!(writer.scalar(k).unwrap(), Scalar::I32(1));
+
+        // Writer half.
+        writer.list_swap(list, 0, 1).unwrap();
+        writer.list_move(list, 1, 0).unwrap();
+        assert!(writer.remove(&p("k")).unwrap());
+
+        // Re-insert the just-removed key: exercises the forwarded put path after a
+        // delete (a fresh child link under the root, not an in-place overwrite).
+        writer.put_scalar(&p("k"), Scalar::I32(2)).unwrap();
+        assert_eq!(writer.scalar_at(&p("k")).unwrap(), Some(Scalar::I32(2)));
+
+        writer.clear_children(&p("list"), list).unwrap();
+        assert_eq!(writer.len(list).unwrap(), 0);
+    }
+
+    #[test]
+    fn boxed_and_arced_dyn_writers_forward_every_method() {
+        let db = StratoDb::create_in_memory().unwrap();
+        let table = db.open_table("t").unwrap();
+
+        {
+            let w = table.write().unwrap();
+            let boxed: Box<dyn Writer + '_> = Box::new(WriteCursor::new(&w));
+            exercise(&boxed);
+        }
+
+        {
+            let w = table.write().unwrap();
+            let arced: Arc<dyn Writer + '_> = Arc::new(WriteCursor::new(&w));
+            exercise(&arced);
+        }
+    }
+}

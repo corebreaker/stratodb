@@ -52,3 +52,23 @@ impl Node {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn kind_maps_each_variant_and_reads_a_packed_root() {
+        assert_eq!(Node::Object.kind(), NodeKind::Object);
+        assert_eq!(Node::List(vec![]).kind(), NodeKind::List);
+        assert_eq!(Node::Leaf(Scalar::Null).kind(), NodeKind::Leaf);
+        assert_eq!(
+            Node::Packed {
+                root: NodeKind::List,
+                blob: vec![],
+            }
+            .kind(),
+            NodeKind::List
+        );
+    }
+}

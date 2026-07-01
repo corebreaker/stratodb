@@ -198,6 +198,9 @@ fn tables_are_isolated() {
     let users = db.open_table("users").unwrap();
     let orders = db.open_table("orders").unwrap();
 
+    assert_eq!(users.name(), "users");
+    assert_eq!(orders.name(), "orders");
+
     let w = users.write().unwrap();
     w.put("alice/age", &30u32).unwrap();
     w.commit().unwrap();
@@ -205,6 +208,17 @@ fn tables_are_isolated() {
     // the other table does not see the first table's data
     let r = orders.read().unwrap();
     assert_eq!(r.kind("alice").unwrap(), None);
+}
+
+#[test]
+fn opening_a_missing_database_file_is_an_engine_error() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("does-not-exist.stratodb");
+
+    // `open` (unlike `create`) never creates the file, so the storage engine
+    // reports it — surfaced opaquely as an `Engine` error. (`StratoDb` is not
+    // `Debug`, so match the `Result` rather than calling `unwrap_err`.)
+    assert!(matches!(StratoDb::open(&path), Err(SdbError::Engine(_))));
 }
 
 #[test]

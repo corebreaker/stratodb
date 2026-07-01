@@ -40,3 +40,21 @@ impl NodeKind {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn labels_tags_and_roundtrip() {
+        assert_eq!(NodeKind::Object.as_str(), "object");
+        assert_eq!(NodeKind::List.as_str(), "list");
+        assert_eq!(NodeKind::Leaf.as_str(), "leaf");
+
+        for kind in [NodeKind::Object, NodeKind::List, NodeKind::Leaf] {
+            assert_eq!(NodeKind::from_tag(kind.as_tag()).unwrap(), kind);
+        }
+
+        assert!(NodeKind::from_tag(9).is_err());
+    }
+}

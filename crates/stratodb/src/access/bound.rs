@@ -120,3 +120,72 @@ impl<B: WriteNodes> Writer for BoundCursor<'_, '_, B> {
         tree::clear_children(&mut **self.backend.borrow_mut(), key)
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::engine::MemNodes;
+
+    fn path(s: &str) -> SPath {
+        SPath::parse(s).unwrap()
+    }
+
+    #[test]
+    fn reads_and_writes_relative_to_the_anchor() {
+        let mut backend = MemNodes::new();
+        let cell = RefCell::new(&mut backend);
+        let cursor = BoundCursor::new(&cell, Skey::ROOT);
+
+        // Build an object root holding a leaf and a two-element list.
+        cursor.ensure_container(&SPath::root(), false).unwrap();
+        cursor.put_scalar(&path("a"), Scalar::I32(1)).unwrap();
+        cursor.ensure_container(&path("xs"), true).unwrap();
+        cursor.put_scalar(&path("xs[0]"), Scalar::I32(10)).unwrap();
+        cursor.put_scalar(&path("xs[1]"), Scalar::I32(20)).unwrap();
+
+        // Path- and key-addressed reads, all relative to the anchor.
+        assert_eq!(cursor.scalar_at(&path("a")).unwrap(), Some(Scalar::I32(1)));
+        assert!(cursor.scalar_at(&path("missing")).unwrap().is_none());
+
+        let root = cursor.resolve(&SPath::root()).unwrap().unwrap();
+        assert_eq!(cursor.kind(root).unwrap(), Some(NodeKind::Object));
+        assert_eq!(
+            cursor.object_keys(root).unwrap(),
+            vec![String::from("a"), String::from("xs")]
+        );
+
+        let a = cursor.child(root, &Segment::Name("a".into())).unwrap().unwrap();
+        assert_eq!(cursor.scalar(a).unwrap(), Scalar::I32(1));
+        assert_eq!(
+            cursor
+                .child_cached(root, &Segment::Name("a".into()), &path("a"))
+                .unwrap(),
+            Some(a)
+        );
+
+        let xs = cursor.resolve(&path("xs")).unwrap().unwrap();
+        assert_eq!(cursor.len(xs).unwrap(), 2);
+
+        // Reorder, remove, clear.
+        cursor.list_swap(xs, 0, 1).unwrap();
+        cursor.list_move(xs, 1, 0).unwrap();
+        assert!(cursor.remove(&path("a")).unwrap());
+        cursor.clear_children(&SPath::root(), xs).unwrap();
+        assert_eq!(cursor.len(xs).unwrap(), 0);
+    }
+
+    #[test]
+    fn scalar_at_on_a_non_leaf_reports_the_wrong_kind() {
+        let mut backend = MemNodes::new();
+        let cell = RefCell::new(&mut backend);
+        let cursor = BoundCursor::new(&cell, Skey::ROOT);
+
+        cursor.ensure_container(&SPath::root(), false).unwrap();
+        cursor.ensure_container(&path("obj"), false).unwrap();
+
+        assert!(matches!(
+            cursor.scalar_at(&path("obj")),
+            Err(SdbError::UnexpectedNode { .. })
+        ));
+    }
+}

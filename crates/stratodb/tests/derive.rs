@@ -288,6 +288,139 @@ fn rename_rename_all_and_alias() {
     assert_eq!(StratoRenamedDesc::FIELDS, &["firstName", "years", "nickname"]);
 }
 
+// ---- every `rename_all` casing, for fields and for variants --------------
+// These need no runtime store: the derive resolves each name at expansion time,
+// so asserting the generated descriptor exercises every casing rule.
+
+// ---- field casings (on structs) ------------------------------------------
+
+#[allow(dead_code)]
+#[derive(SData)]
+#[strato(rename_all = "lowercase")]
+struct CaseLower {
+    two_words: u32,
+}
+
+#[allow(dead_code)]
+#[derive(SData)]
+#[strato(rename_all = "UPPERCASE")]
+struct CaseUpper {
+    two_words: u32,
+}
+
+#[allow(dead_code)]
+#[derive(SData)]
+#[strato(rename_all = "PascalCase")]
+struct CasePascal {
+    two_words: u32,
+    // A leading underscore yields an empty split segment, exercising the
+    // empty-word branch of the casing helper.
+    _leading:  u32,
+}
+
+#[allow(dead_code)]
+#[derive(SData)]
+#[strato(rename_all = "SCREAMING_SNAKE_CASE")]
+struct CaseScreamingSnake {
+    two_words: u32,
+}
+
+#[allow(dead_code)]
+#[derive(SData)]
+#[strato(rename_all = "kebab-case")]
+struct CaseKebab {
+    two_words: u32,
+}
+
+#[allow(dead_code)]
+#[derive(SData)]
+#[strato(rename_all = "SCREAMING-KEBAB-CASE")]
+struct CaseScreamingKebab {
+    two_words: u32,
+}
+
+// ---- variant casings (on enums) ------------------------------------------
+
+#[allow(dead_code)]
+#[derive(SData)]
+#[strato(rename_all = "PascalCase")]
+enum VarPascal {
+    TwoWords,
+}
+
+#[allow(dead_code)]
+#[derive(SData)]
+#[strato(rename_all = "lowercase")]
+enum VarLower {
+    TwoWords,
+}
+
+#[allow(dead_code)]
+#[derive(SData)]
+#[strato(rename_all = "UPPERCASE")]
+enum VarUpper {
+    TwoWords,
+}
+
+#[allow(dead_code)]
+#[derive(SData)]
+#[strato(rename_all = "camelCase")]
+enum VarCamel {
+    TwoWords,
+}
+
+#[allow(dead_code)]
+#[derive(SData)]
+#[strato(rename_all = "SCREAMING_SNAKE_CASE")]
+enum VarScreamingSnake {
+    TwoWords,
+}
+
+#[allow(dead_code)]
+#[derive(SData)]
+#[strato(rename_all = "kebab-case")]
+enum VarKebab {
+    TwoWords,
+}
+
+#[allow(dead_code)]
+#[derive(SData)]
+#[strato(rename_all = "SCREAMING-KEBAB-CASE")]
+enum VarScreamingKebab {
+    TwoWords,
+}
+
+#[allow(dead_code)]
+#[derive(SData)]
+enum VarMultiAttr {
+    // Two items in one `#[strato(...)]` exercise the comma-separated attr loop.
+    #[strato(rename = "renamed", alias = "old")]
+    First,
+    Second,
+}
+
+#[test]
+fn rename_all_casings_map_field_names() {
+    assert_eq!(StratoCaseLowerDesc::FIELDS, &["two_words"]);
+    assert_eq!(StratoCaseUpperDesc::FIELDS, &["TWO_WORDS"]);
+    assert_eq!(StratoCasePascalDesc::FIELDS, &["TwoWords", "Leading"]);
+    assert_eq!(StratoCaseScreamingSnakeDesc::FIELDS, &["TWO_WORDS"]);
+    assert_eq!(StratoCaseKebabDesc::FIELDS, &["two-words"]);
+    assert_eq!(StratoCaseScreamingKebabDesc::FIELDS, &["TWO-WORDS"]);
+}
+
+#[test]
+fn rename_all_casings_map_variant_names() {
+    assert_eq!(StratoVarPascalDesc::VARIANTS, &["TwoWords"]);
+    assert_eq!(StratoVarLowerDesc::VARIANTS, &["twowords"]);
+    assert_eq!(StratoVarUpperDesc::VARIANTS, &["TWOWORDS"]);
+    assert_eq!(StratoVarCamelDesc::VARIANTS, &["twoWords"]);
+    assert_eq!(StratoVarScreamingSnakeDesc::VARIANTS, &["TWO_WORDS"]);
+    assert_eq!(StratoVarKebabDesc::VARIANTS, &["two-words"]);
+    assert_eq!(StratoVarScreamingKebabDesc::VARIANTS, &["TWO-WORDS"]);
+    assert_eq!(StratoVarMultiAttrDesc::VARIANTS, &["renamed", "Second"]);
+}
+
 #[test]
 fn alias_is_accepted_on_load() {
     let db = StratoDb::create_in_memory().unwrap();

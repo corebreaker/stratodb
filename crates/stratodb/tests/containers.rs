@@ -2,8 +2,9 @@
 //! exercised through both the value API (`store`/`load`) and the accessors.
 
 use stratodb::{
-    data::{Bytes, Map, MapMut, OptRef, Seq, SeqMut},
+    data::{Bytes, Map, MapMut, OptMut, OptRef, Seq, SeqMut, refs::SIdentifiable},
     NodeKind,
+    SdbError,
     StratoDb,
     Table,
 };
@@ -380,4 +381,169 @@ fn map_drain_and_clear() {
     let r = table.read().unwrap();
     assert_eq!(r.load::<BTreeMap<String, i32>>("m").unwrap(), BTreeMap::new());
     assert_eq!(r.kind("m").unwrap(), Some(NodeKind::Object));
+}
+
+#[test]
+fn loading_a_container_from_an_absent_path_is_empty_or_missing() {
+    let table = table();
+
+    // The table must exist (be written once) for an absent path to resolve to
+    // `None` — the empty-container branch — rather than to a missing table.
+    let w = table.write().unwrap();
+    w.put("marker", &1u32).unwrap();
+    w.commit().unwrap();
+
+    let r = table.read().unwrap();
+    assert_eq!(r.load::<Vec<i32>>("nope").unwrap(), Vec::<i32>::new());
+    assert_eq!(r.load::<BTreeMap<String, i32>>("nope").unwrap(), BTreeMap::new());
+    assert_eq!(r.load::<Option<i32>>("nope").unwrap(), None);
+    assert!(matches!(r.load::<Bytes>("nope"), Err(SdbError::PathNotFound(_))));
+}
+
+#[test]
+fn option_mut_and_accessor_identity() {
+    let table = table();
+
+    let w = table.write().unwrap();
+    w.store("some", &Some(1i32)).unwrap();
+    w.store("none", &Option::<i32>::None).unwrap();
+    w.store("wrap", &Some(vec![1i32, 2, 3])).unwrap();
+    {
+        // A `Some` accessor reports present; `set(None)` then clears the node.
+        // The accessor's key is eager, so it goes stale after `set` rewrites the
+        // node — check the outcome through a fresh load, not the same accessor.
+        let opt = w.fetch_mut::<OptMut<i32>>("some").unwrap();
+        assert!(!opt.is_none().unwrap());
+        assert!(!opt.path().is_empty());
+        let _ = opt.key();
+        opt.set(&None).unwrap();
+    }
+    {
+        // A `None` accessor reports absent; `set(Some(..))` fills it.
+        let opt = w.fetch_mut::<OptMut<i32>>("none").unwrap();
+        assert!(opt.is_none().unwrap());
+        opt.set(&Some(9)).unwrap();
+    }
+    w.commit().unwrap();
+
+    let r = table.read().unwrap();
+    assert_eq!(r.load::<Option<i32>>("some").unwrap(), None);
+    assert_eq!(r.load::<Option<i32>>("none").unwrap(), Some(9));
+
+    // A `Some(composite)` is a non-leaf node, so `is_none` takes the non-leaf path.
+    let wrap = r.fetch::<OptRef<Vec<i32>>>("wrap").unwrap();
+    assert!(!wrap.is_none().unwrap());
+    let _ = wrap.key();
+    assert_eq!(wrap.path().to_string(), "wrap");
+    assert_eq!(wrap.get().unwrap().unwrap().len().unwrap(), 3);
+}
+
+#[test]
+fn seq_accessor_edges() {
+    let table = table();
+
+    let w = table.write().unwrap();
+    w.store("xs", &vec![1i32, 2, 3, 4]).unwrap();
+    w.commit().unwrap();
+
+    let r = table.read().unwrap();
+    let seq = r.fetch::<Seq<i32>>("xs").unwrap();
+    let _ = seq.key();
+    assert_eq!(seq.path().to_string(), "xs");
+
+    // Each element accessor is a `Leaf`, carrying its own key and path.
+    let elem = seq.get(0).unwrap();
+    let _ = elem.key();
+    assert_eq!(elem.path().to_string(), "xs[0]");
+    assert_eq!(elem.get().unwrap(), 1);
+
+    assert!(matches!(
+        seq.get(99),
+        Err(SdbError::IndexOutOfRange {
+            index: 99,
+            len: 4,
+            ..
+        })
+    ));
+
+    let w = table.write().unwrap();
+    {
+        let xs = w.fetch_mut::<SeqMut<i32>>("xs").unwrap();
+        let _ = xs.key();
+        assert_eq!(xs.path().to_string(), "xs");
+
+        // A mutable element accessor is a `LeafMut`, likewise identifiable.
+        let elem = xs.get(0).unwrap();
+        let _ = elem.key();
+        assert_eq!(elem.path().to_string(), "xs[0]");
+        assert_eq!(elem.get().unwrap(), 1);
+        assert!(matches!(
+            xs.get(99),
+            Err(SdbError::IndexOutOfRange {
+                index: 99,
+                len: 4,
+                ..
+            })
+        ));
+        assert!(xs.contains(&3).unwrap());
+        assert!(!xs.contains(&99).unwrap());
+
+        // A range past the end stops at the last element (the break arm).
+        xs.remove_range(2..10).unwrap(); // [1, 2]
+        assert_eq!(xs.len().unwrap(), 2);
+
+        assert_eq!(xs.swap_remove(99).unwrap(), None);
+    }
+    w.commit().unwrap();
+
+    // pop on an emptied list returns None.
+    let w = table.write().unwrap();
+    {
+        let xs = w.fetch_mut::<SeqMut<i32>>("xs").unwrap();
+        xs.clear().unwrap();
+        assert_eq!(xs.pop_first().unwrap(), None);
+        assert_eq!(xs.pop_last().unwrap(), None);
+    }
+    w.commit().unwrap();
+}
+
+#[test]
+fn map_accessor_edges() {
+    let table = table();
+
+    let w = table.write().unwrap();
+    w.store("m", &sample_map()).unwrap();
+    w.commit().unwrap();
+
+    let r = table.read().unwrap();
+    let map = r.fetch::<Map<i32>>("m").unwrap();
+    let _ = map.key();
+    assert_eq!(map.path().to_string(), "m");
+
+    let w = table.write().unwrap();
+    {
+        let mm = w.fetch_mut::<MapMut<i32>>("m").unwrap();
+        let _ = mm.key();
+        assert_eq!(mm.path().to_string(), "m");
+        assert!(mm.contains_key("a").unwrap());
+        assert!(!mm.contains_key("zzz").unwrap());
+        assert!(mm.get("zzz").unwrap().is_none());
+
+        let values: Vec<i32> = mm.values_mut().unwrap().map(|v| v.unwrap().get().unwrap()).collect();
+        assert_eq!(values, vec![1, 2, 3]);
+
+        let (last_key, _) = mm.last_mut().unwrap().unwrap();
+        assert_eq!(last_key, "c");
+    }
+    w.commit().unwrap();
+
+    // pop on an emptied map returns None.
+    let w = table.write().unwrap();
+    {
+        let mm = w.fetch_mut::<MapMut<i32>>("m").unwrap();
+        mm.clear().unwrap();
+        assert_eq!(mm.pop_first().unwrap(), None);
+        assert_eq!(mm.pop_last().unwrap(), None);
+    }
+    w.commit().unwrap();
 }
