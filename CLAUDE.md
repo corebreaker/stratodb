@@ -288,7 +288,7 @@ The export writers also carry `src` unit tests: `export/scalar.rs` (each `Scalar
 
 ### Benchmark suite
 
-Criterion benches under `benches/` (all `required-features = ["derive"]`), one file per feature area, all sharing the `benches/common` fixtures (a `User` entity with one unique + one non-unique index; `populated()` and the `Ring` working set).
+Criterion benches under `benches/` (all `required-features = ["derive"]`), one file per feature area. Most share the `benches/common` fixtures (a flat `User` entity with one unique + one non-unique index; `populated()` and the `Ring` working set); `lists.rs` defines its own list-bearing entity.
 
 | Bench              | What it measures                                                                                        |
 |--------------------|---------------------------------------------------------------------------------------------------------|
@@ -298,6 +298,7 @@ Criterion benches under `benches/` (all `required-features = ["derive"]`), one f
 | `deletes.rs`       | cascading entity removal (un-indexed and indexed), via `iter_batched` so only the delete is timed       |
 | `indexes.rs`       | indexed `find`/reverse `query`, indexed store/update/remove maintenance, `create_index` back-fill       |
 | `dynamic_value.rs` | `Value` load/store, in-memory `get_value`/`set_value`, JSON (compact/pretty) + YAML export              |
+| `lists.rs`         | a list-bearing entity (a `Vec` field of `N` elements): whole `store`/`load`, `read_element` (one element), and `update_element` under both regimes — **packed** (blob rewrite) and **shredded** (an index reaching into the elements makes each its own node, so the update touches one leaf) |
 
 ---
 

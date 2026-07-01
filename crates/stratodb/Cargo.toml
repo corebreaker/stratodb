@@ -79,6 +79,11 @@ harness = false
 required-features = ["derive"]
 
 [[bench]]
+name = "lists"
+harness = false
+required-features = ["derive"]
+
+[[bench]]
 name = "dynamic_value"
 harness = false
 required-features = ["derive"]
