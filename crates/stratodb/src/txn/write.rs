@@ -202,6 +202,10 @@ impl WriteTxn {
 
         /// One pair's pre-built result: a ready packed node, or an index back into
         /// `items` for the (rare) pairs that cannot pack and fall back to `store`.
+        // The `Packed` variant is deliberately the large one and also the common
+        // case; boxing it (clippy's `large_enum_variant` suggestion) would add a
+        // heap allocation per entity on this bulk hot path, so keep it inline.
+        #[allow(clippy::large_enum_variant)]
         enum Built {
             Packed {
                 base:   SPath,
