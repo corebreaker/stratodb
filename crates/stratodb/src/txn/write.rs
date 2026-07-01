@@ -34,8 +34,10 @@ pub struct WriteTxn {
     inner:   Arc<DbInner>,
     /// This table's indexes, loaded from `$metadata` on first mutation and reused
     /// for the rest of the transaction (the set cannot change mid-transaction).
-    /// `OnceLock` rather than `OnceCell` so the transaction stays `Sync`.
-    indexes: OnceLock<Vec<IndexEntry>>,
+    /// `OnceLock` rather than `OnceCell` so the transaction stays `Sync`. Held as
+    /// an `Arc` shared with the database-wide [`cached_indexes`](DbInner::cached_indexes)
+    /// cache, so the common (unchanged-schema) case avoids reopening `$metadata`.
+    indexes: OnceLock<Arc<[IndexEntry]>>,
 }
 
 impl WriteTxn {
@@ -383,17 +385,19 @@ impl WriteTxn {
 
     // -- index maintenance --
 
-    /// This table's indexes, loaded once and cached for the transaction.
+    /// This table's indexes, loaded once and cached for the transaction. Served
+    /// from the database-wide index-set cache when the index schema is unchanged,
+    /// so the steady state never reopens `$metadata` to maintain indexes.
     fn indexes(&self) -> SdbResult<&[IndexEntry]> {
         if let Some(indexes) = self.indexes.get() {
             return Ok(indexes);
         }
 
-        let loaded = {
+        let loaded = self.inner.cached_indexes(&self.table, || {
             let meta = self.txn.open_table(engine::META_TABLE)?;
 
-            registry::for_table(&meta, &self.table)?
-        };
+            registry::for_table(&meta, &self.table)
+        })?;
 
         Ok(self.indexes.get_or_init(|| loaded))
     }

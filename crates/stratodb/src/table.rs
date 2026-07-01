@@ -100,6 +100,8 @@ impl Table {
         }
 
         txn.commit()?;
+        self.inner.bump_schema_gen();
+
         Ok(())
     }
 
@@ -156,6 +158,8 @@ impl Table {
         }
 
         txn.commit()?;
+        self.inner.bump_schema_gen();
+
         Ok(())
     }
 
@@ -219,6 +223,8 @@ impl Table {
         }
 
         txn.commit()?;
+        self.inner.bump_schema_gen();
+
         Ok(found)
     }
 
