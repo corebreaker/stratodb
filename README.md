@@ -21,7 +21,7 @@ and JSON/YAML export — all with no storage-engine types leaking into the publi
 - **Partial access scales.** Reading one field of a wide record — or one element of a large list — navigates
     straight to it without decoding the rest, so its cost stays roughly flat as the entity grows and pulls far
     ahead of a flat blob store (≈16× at 1 024 list elements, ≈200× at 10 240 — see [Benchmarks](#benchmarks)).
-- **Stable identity.** Nodes carry an opaque `Skey` (a UUIDv7) that survives renames and moves;
+- **Stable identity.** Nodes carry an opaque `Skey` (a random 128-bit key) that survives renames and moves;
     paths are ephemeral addresses resolved by walking the tree.
 - **Typed access.** Implement the `SData` trait by hand,
     or `#[derive(SData)]` with Serde-style `#[strato(...)]` attributes
