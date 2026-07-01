@@ -45,6 +45,13 @@ impl MemReader {
     /// a path that does not start with `base` cannot resolve here.
     fn resolve_rebased(&self, path: &SPath) -> SdbResult<Option<Skey>> {
         let base = self.base.segments();
+
+        // Whole-entity load (the hot path): `base` is the root, so `path` is already
+        // relative — walk it directly, with no segment-slice re-allocation.
+        if base.is_empty() {
+            return tree::resolve_from(&*self.nodes, self.root, path);
+        }
+
         let segs = path.segments();
         if segs.len() < base.len() || segs[..base.len()] != *base {
             return Ok(None);

@@ -194,7 +194,7 @@ pub(crate) fn get_scalar<B: ReadNodes>(b: &B, path: &SPath) -> SdbResult<Option<
 }
 
 /// Reads the leaf scalar at `key`, erroring if the node there is not a leaf.
-fn leaf_at<B: ReadNodes>(b: &B, key: Skey, path: &SPath) -> SdbResult<Option<Scalar>> {
+pub(crate) fn leaf_at<B: ReadNodes>(b: &B, key: Skey, path: &SPath) -> SdbResult<Option<Scalar>> {
     match read_node(b, key)? {
         Some(Node::Leaf(scalar)) => Ok(Some(scalar)),
         Some(other) => Err(SdbError::UnexpectedNode {

@@ -148,15 +148,24 @@ impl ReadTxn {
     }
 
     pub(crate) fn load_at<T: SData>(&self, base: &SPath) -> SdbResult<T> {
-        let Some(table) = self.open()? else {
-            return Err(SdbError::PathNotFound(base.clone()));
-        };
-
         // Fast path: a cached resolution of `base` to a node key. This covers the
         // common whole-entity load — `base` lands on a node (plain or a packed
         // entity) rather than descending into one — and reuses the shared path
-        // cache instead of re-walking the tree on every load.
+        // cache instead of re-walking the tree on every load. `lookup_path` only
+        // opens the engine table on a cache miss, so a fully warm read (path and
+        // blob both cached) serves the whole load from memory — the table is never
+        // opened, an open redb pays on every read but StratoDB can skip.
         if let Some(key) = self.lookup_path(base)? {
+            if let Some(mem) = self.cache.get_blob(self.generation, key)? {
+                return T::load(&MemReader::new(mem, Skey::ROOT, SPath::root()), &SPath::root());
+            }
+
+            // Path cached but blob not (or `base` is a plain node): the table is
+            // needed to read — and cache — the entity.
+            let Some(table) = self.open()? else {
+                return Err(SdbError::PathNotFound(base.clone()));
+            };
+
             return match self.packed_mem(table, key)? {
                 Some(mem) => T::load(&MemReader::new(mem, Skey::ROOT, SPath::root()), &SPath::root()),
                 None => T::load(&ReadCursor::new(self), base),
@@ -165,6 +174,10 @@ impl ReadTxn {
 
         // `base` did not resolve directly: it is either inside a packed entity (the
         // walk stops at the entity) or genuinely absent.
+        let Some(table) = self.open()? else {
+            return Err(SdbError::PathNotFound(base.clone()));
+        };
+
         match tree::locate(table, base)? {
             // Absent: the path loader applies any field `default` fallback.
             Located::Missing | Located::Plain(_) => T::load(&ReadCursor::new(self), base),
@@ -325,12 +338,33 @@ impl ReadTxn {
         Ok(resolved)
     }
 
-    /// Reads the scalar at `path` (resolving through the cache); errors if the node
-    /// there is not a leaf.
+    /// Reads the scalar at `path`; errors if the node there is not a leaf.
+    ///
+    /// A field inside a packed entity is served through the shared blob cache and
+    /// navigated zero-copy, so reading one field of a hot entity reuses its already
+    /// decoded archive instead of re-decoding the whole blob — the win over a flat
+    /// value store, which must decode the entire record to reach any single field.
     fn scalar_at_path(&self, path: &SPath) -> SdbResult<Option<Scalar>> {
-        match self.open()? {
-            Some(table) => tree::get_scalar(table, path),
-            None => Ok(None),
+        let Some(table) = self.open()? else {
+            return Ok(None);
+        };
+
+        match tree::locate(table, path)? {
+            tree::Located::Missing => Ok(None),
+            tree::Located::Plain(key) => tree::leaf_at(table, key, path),
+            tree::Located::Packed {
+                entity,
+                rel,
+            } => {
+                let mem = self
+                    .packed_mem(table, entity)?
+                    .ok_or_else(|| SdbError::Corrupt("locate reported a packed entity that is not packed".into()))?;
+
+                match tree::resolve_from(&*mem, Skey::ROOT, &rel)? {
+                    Some(key) => tree::leaf_at(&*mem, key, path),
+                    None => Ok(None),
+                }
+            }
         }
     }
 

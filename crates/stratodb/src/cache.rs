@@ -13,10 +13,15 @@ use lru::LruCache;
 use std::{num::NonZeroUsize, sync::Arc, sync::Mutex};
 
 /// A thread-safe, bounded set of per-table caches shared by all of that table's
-/// transactions: `(generation, SPath) -> Skey` path resolutions and
+/// transactions: `SPath -> (generation, Skey)` path resolutions and
 /// `(generation, Skey) -> MemNodes` decoded packed-entity blobs.
+///
+/// The path cache stores the resolving generation in the *value*, not the key, so
+/// a lookup borrows the caller's `&SPath` directly instead of cloning it into a
+/// composite key on every hot-path read; a stale-generation hit reads as a miss
+/// and is re-resolved (and overwritten) under the caller's own snapshot.
 pub(crate) struct PathCache {
-    entries: Mutex<LruCache<(u64, SPath), Skey>>,
+    entries: Mutex<LruCache<SPath, (u64, Skey)>>,
     blobs:   Mutex<LruCache<(u64, Skey), Arc<ArchivedNodes>>>,
 }
 
@@ -60,7 +65,9 @@ impl PathCache {
         Ok(())
     }
 
-    /// Returns the cached key for `path` at `generation`, if present.
+    /// Returns the cached key for `path` at `generation`, if present. A hit tagged
+    /// with another generation is treated as a miss (the resolution belongs to a
+    /// different committed version).
     pub(crate) fn get(&self, generation: u64, path: &SPath) -> SdbResult<Option<Skey>> {
         let key = self
             .entries
@@ -70,8 +77,8 @@ impl PathCache {
 
                 SdbError::CannotAccess(msg)
             })?
-            .get(&(generation, path.clone()))
-            .copied();
+            .get(path)
+            .and_then(|(tagged, key)| (*tagged == generation).then_some(*key));
 
         Ok(key)
     }
@@ -85,7 +92,7 @@ impl PathCache {
 
                 SdbError::CannotAccess(msg)
             })?
-            .put((generation, path.clone()), key);
+            .put(path.clone(), (generation, key));
 
         Ok(())
     }
