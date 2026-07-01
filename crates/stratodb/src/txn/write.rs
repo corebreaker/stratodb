@@ -123,9 +123,26 @@ impl WriteTxn {
             let node = mem.into_packed()?;
             let last = last.clone();
 
-            return self.reindex_around(base, move |table| {
-                tree::remove_path(table, base)?;
-                tree::store_packed(table, &parent_path, &last, node)
+            return self.reindex_around(base, move |table| match tree::locate(table, base)? {
+                // Replacing a packed entity with another packed entity: overwrite
+                // its blob in place, reusing the key. No child-link rewrite, no
+                // fresh key, no cascade delete — a single engine write, the same
+                // cost a bare key-value upsert pays. Index maintenance brackets it
+                // exactly as before: the entity key is unchanged, so its index
+                // entries are deleted (old columns) and re-inserted (new columns)
+                // correctly. This also keeps an entity's identity stable across an
+                // overwriting `store`.
+                Located::Packed {
+                    entity,
+                    rel,
+                } if rel.is_empty() => tree::write_packed(table, entity, node),
+
+                // Fresh, or replacing a shredded subtree: clear it and link a new
+                // packed entity under the parent.
+                _ => {
+                    tree::remove_path(table, base)?;
+                    tree::store_packed(table, &parent_path, &last, node)
+                }
             });
         }
 

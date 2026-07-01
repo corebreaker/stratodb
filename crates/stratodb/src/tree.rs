@@ -690,7 +690,10 @@ pub(crate) fn store_packed<B: WriteNodes>(b: &mut B, parent_path: &SPath, last: 
 
 /// Like [`store_packed`] but with the parent already resolved to `parent_key`, so
 /// a batch sharing a parent resolves it once. Replaces any existing child at
-/// `last` (its old subtree is dropped) and links the fresh entity in.
+/// `last`: if that child is itself a packed entity, its blob is overwritten in
+/// place (the key — and thus identity and index entries — is preserved, and no
+/// child link is rewritten); otherwise its old subtree is dropped and the fresh
+/// entity is linked in.
 pub(crate) fn store_packed_under<B: WriteNodes>(
     b: &mut B,
     parent_key: Skey,
@@ -699,6 +702,12 @@ pub(crate) fn store_packed_under<B: WriteNodes>(
     node: Node,
 ) -> SdbResult<()> {
     if let Some(old) = child_key(&*b, parent_key, last)? {
+        // Overwrite a packed entity in place — one write, key reused. Index
+        // maintenance brackets the caller, so the unchanged key re-indexes right.
+        if matches!(read_node(&*b, old)?, Some(Node::Packed { .. })) {
+            return write_node(b, old, node);
+        }
+
         cascade_delete(b, old)?;
     }
 
