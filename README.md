@@ -1,3 +1,8 @@
+[![Crates.io]](https://crates.io/crates/stratodb)
+[![Docs.rs](https://img.shields.io/docsrs/stratodb?style=for-the-badge)](https://docs.rs/stratodb/)
+[![CircleCI]](https://circleci.com/gh/corebreaker/stratodb/tree/main)
+[![Coverage Status]](https://coveralls.io/github/corebreaker/stratodb?branch=main)
+
 # StratoDB
 
 A typed, transactional, indexed document store for Rust, layered over an embedded key-value engine.
@@ -8,7 +13,7 @@ so an entity keeps its identity through renames and moves. On top of that sit a 
 ordered secondary indexes, a dynamic document type,
 and JSON/YAML export — all with no storage-engine types leaking into the public API.
 
-> **Status:** pre-1.0 (`0.1.x`), not yet released to crates.io.
+> **Status:** 1.0 — stable and released on [crates.io](https://crates.io/crates/stratodb).
 > The architecture is locked and every capability below is implemented, tested, and documented.
 > See [Project status](#project-status).
 
@@ -39,18 +44,24 @@ and JSON/YAML export — all with no storage-engine types leaking into the publi
 
 ## Installation
 
-StratoDB is not yet published to crates.io. Depend on it from Git:
+Add StratoDB from crates.io:
 
 ```toml
 [dependencies]
-stratodb = { git = "https://github.com/corebreaker/stratodb" }
+stratodb = "1.0"
 ```
 
 Most users will want the derive macro:
 
 ```toml
 [dependencies]
-stratodb = { git = "https://github.com/corebreaker/stratodb", features = ["derive"] }
+stratodb = { version = "1.0", features = ["derive"] }
+```
+
+Or with `cargo add`:
+
+```sh
+cargo add stratodb --features derive
 ```
 
 It builds on a recent stable Rust toolchain (edition 2024). See [Cargo features](#cargo-features) for the full matrix.
@@ -583,12 +594,16 @@ or carry big collections you touch a piece at a time.
 | Dynamic `Value` + JSON/YAML export                           |    ✅    |
 | Documentation (README, crate rustdoc, runnable examples)     |    ✅    |
 | Criterion benchmark suite (all feature areas)                |    ✅    |
+| **1.0 released on crates.io**                                |    ✅    |
 
-Everything above is complete; the next step toward 1.0 is a crates.io release.
-Planned but not yet scheduled: `rust_decimal` support, schema migration, richer typed enum accessors.
+StratoDB is **1.0**: everything above is complete, tested, and published on crates.io, and the on-disk format and public API are stable. Planned for a later release, but not yet scheduled: `rust_decimal` support, schema migration, and richer typed enum accessors.
 
 ---
 
 ## License
 
 Licensed under the [MIT License](LICENSE).
+
+[Crates.io]: https://img.shields.io/crates/v/stratodb?style=for-the-badge
+[CircleCI]: https://img.shields.io/circleci/build/github/corebreaker/stratodb/main?style=for-the-badge
+[Coverage Status]: https://img.shields.io/coveralls/github/corebreaker/stratodb/main?style=for-the-badge
