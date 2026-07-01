@@ -21,14 +21,14 @@ jobs:
           REVISION=$(echo "$TAG" | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' | head -n1)
 
           if [ -z "$REVISION" ]; then
-            echo "Impossible d'extraire une révision X.Y.Z depuis le tag $TAG"
+            echo "Unable to extract an X.Y.Z revision from tag $TAG"
             exit 0
           fi
 
           NUM=$(gh api repos/$REPO/milestones --jq ".[] | select(.title | contains(\"$REVISION\")) | .number" | head -n1)
 
           if [ -z "$NUM" ]; then
-            echo "Aucun milestone ouvert ne correspond à la révision $REVISION"
+            echo "No open milestone matches revision $REVISION"
             exit 0
           fi
 
