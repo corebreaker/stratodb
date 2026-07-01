@@ -3,7 +3,7 @@ version: 2.1
 jobs:
   checks:
     docker:
-      - image: corebreaker/rust-devtools-circleci:rust-1.96.0-v0.3.15
+      - image: corebreaker/rust-devtools-circleci:rust-1.96.0-v0.4.6
         auth:
           username: corebreaker
           password: $DOCKERHUB_ACCESS_TOKEN
@@ -18,7 +18,7 @@ jobs:
 
   coverage:
     docker:
-      - image: corebreaker/rust-devtools-circleci:rust-1.96.0-v0.3.15
+      - image: corebreaker/rust-devtools-circleci:rust-1.96.0-v0.4.6
         auth:
           username: corebreaker
           password: $DOCKERHUB_ACCESS_TOKEN
@@ -26,10 +26,10 @@ jobs:
       - checkout
       - run:
           name: Make coverage
-          command: "coverage.sh"
+          command: "coverage.sh -p crates/ -a -w"
       - run:
           name: Upload Coverage Result To Coveralls
-          command: "coveralls circleci -r poreader -D target -t $COVERALLS_REPO_TOKEN target/coverage/coveralls.json"
+          command: "coveralls circleci -r stratodb -t $COVERALLS_REPO_TOKEN target/coverage/coveralls.json"
       - store_artifacts:
           path: target/coverage
 
