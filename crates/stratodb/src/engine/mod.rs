@@ -19,7 +19,7 @@ mod table_value;
 
 pub(crate) use self::{
     archived::ArchivedNodes,
-    backend::{MemNodes, ReadNodes, WriteNodes},
+    backend::{MemNodes, NodeStep, ReadNodes, WriteNodes},
     table_defs::META_TABLE,
     table_key::TableKey,
     table_value::TableValue,

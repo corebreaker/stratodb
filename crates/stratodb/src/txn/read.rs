@@ -470,7 +470,7 @@ fn scan_prefix(
             } if entry_id == id && cols.starts_with(prefix) => {
                 let entity = match entity {
                     Some(entity) => entity,
-                    None => match value.value() {
+                    None => match value.value().into_owned() {
                         TableValue::Skey(entity) => entity,
                         _ => return Err(SdbError::Corrupt("unique index entry without an entity key".into())),
                     },

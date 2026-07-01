@@ -15,7 +15,7 @@
 
 use crate::{
     data::Scalar,
-    engine::{MemNodes, ReadNodes, TableKey, TableValue, WriteNodes},
+    engine::{MemNodes, NodeStep, ReadNodes, TableKey, TableValue, WriteNodes},
     error::{SdbError, SdbResult},
     node::{Node, NodeKind},
     path::{SPath, Segment},
@@ -139,14 +139,16 @@ pub(crate) fn locate<B: ReadNodes>(b: &B, path: &SPath) -> SdbResult<Located> {
     let mut key = Skey::ROOT;
     let mut i = 0;
     loop {
-        // A missing node is only reachable at the root of an empty store (a resolved
-        // child link always points at a live node), so this doubles as the existence
-        // check the old separate root probe did.
-        let Some(node) = read_node(b, key)? else {
+        // Classify the node without materializing a packed blob: `node_step` reports
+        // packed / list(items) / plain, so the common terminal — a packed entity —
+        // is detected without copying its blob. A missing node is only reachable at
+        // the root of an empty store (a resolved child link always points at a live
+        // node), so this doubles as the existence check the old root probe did.
+        let Some(step) = b.node_step(key)? else {
             return Ok(Located::Missing);
         };
 
-        if matches!(node, Node::Packed { .. }) {
+        if matches!(step, NodeStep::Packed) {
             return Ok(Located::Packed {
                 entity: key,
                 rel:    SPath::from_segments(&segs[i..]),
@@ -157,13 +159,14 @@ pub(crate) fn locate<B: ReadNodes>(b: &B, path: &SPath) -> SdbResult<Located> {
             return Ok(Located::Plain(key));
         }
 
-        // Resolve the next hop through the node just read: an object child is a
-        // point lookup on the child-link block (the node is not needed), but a list
-        // index is served straight from this list node rather than re-reading it.
+        // Resolve the next hop through what `node_step` returned: an object child is
+        // a point lookup on the child-link block (the node itself is not needed), but
+        // a list index is served straight from the element keys it already carried,
+        // so a list node is not read a second time.
         let child = match &segs[i] {
             Segment::Name(name) => object_child(b, key, name)?,
-            Segment::Index(index) => match &node {
-                Node::List(items) => items.get(*index as usize).copied(),
+            Segment::Index(index) => match &step {
+                NodeStep::List(items) => items.get(*index as usize).copied(),
                 _ => None,
             },
         };

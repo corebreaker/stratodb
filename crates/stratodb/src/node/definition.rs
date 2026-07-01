@@ -1,16 +1,15 @@
 use super::NodeKind;
-use crate::{
-    codec::{self, Reader},
-    error::{SdbError, SdbResult},
-    data::Scalar,
-    Skey,
-};
+use crate::{data::Scalar, Skey};
 
-mod tag {
-    pub(super) const OBJECT: u8 = 0;
-    pub(super) const LIST: u8 = 1;
-    pub(super) const LEAF: u8 = 2;
-    pub(super) const PACKED: u8 = 3;
+// The on-disk node discriminant. A node's byte (de)serialization lives at the
+// storage boundary (`engine::table_value`, which decodes a packed blob by
+// reference rather than copying it); these constants are its single source of
+// truth, kept beside the `Node` type they tag.
+pub(crate) mod tag {
+    pub(crate) const OBJECT: u8 = 0;
+    pub(crate) const LIST: u8 = 1;
+    pub(crate) const LEAF: u8 = 2;
+    pub(crate) const PACKED: u8 = 3;
 }
 
 /// A stored node: either a container (object/list), a leaf, or a packed entity.
@@ -50,60 +49,6 @@ impl Node {
             Node::Packed {
                 root, ..
             } => *root,
-        }
-    }
-
-    pub(crate) fn encode(&self, buf: &mut Vec<u8>) {
-        match self {
-            Node::Object => {
-                buf.push(tag::OBJECT);
-            }
-            Node::List(items) => {
-                buf.push(tag::LIST);
-                codec::put_u32(buf, items.len() as u32);
-
-                for key in items {
-                    buf.extend_from_slice(&key.into_bytes());
-                }
-            }
-            Node::Leaf(scalar) => {
-                buf.push(tag::LEAF);
-                scalar.encode(buf);
-            }
-            Node::Packed {
-                root,
-                blob,
-            } => {
-                buf.push(tag::PACKED);
-                buf.push(root.as_tag());
-                codec::put_bytes(buf, blob);
-            }
-        }
-    }
-
-    pub(crate) fn decode(r: &mut Reader<'_>) -> SdbResult<Node> {
-        match r.u8()? {
-            tag::OBJECT => Ok(Node::Object),
-            tag::PACKED => {
-                let root = NodeKind::from_tag(r.u8()?)?;
-                let blob = r.bytes()?.to_vec();
-
-                Ok(Node::Packed {
-                    root,
-                    blob,
-                })
-            }
-            tag::LIST => {
-                let count = r.u32()? as usize;
-                let mut items = Vec::with_capacity(count);
-                for _ in 0..count {
-                    items.push(Skey::from_bytes(r.array()?));
-                }
-
-                Ok(Node::List(items))
-            }
-            tag::LEAF => Ok(Node::Leaf(Scalar::decode(r)?)),
-            other => Err(SdbError::Corrupt(format!("unknown node tag {other}"))),
         }
     }
 }

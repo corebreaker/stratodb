@@ -3,6 +3,6 @@
 mod definition;
 mod kind;
 
-pub(crate) use definition::Node;
+pub(crate) use definition::{tag, Node};
 
 pub use kind::NodeKind;

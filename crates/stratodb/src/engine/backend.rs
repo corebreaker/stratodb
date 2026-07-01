@@ -14,6 +14,7 @@
 
 use super::{
     archived::{self, ArchNode, ArchTree, ArchivedNodes, NodeView},
+    table_value::{NodeRef, TableValueRef},
     TableKey,
     TableValue,
 };
@@ -57,6 +58,18 @@ type SkeyMap<V> = HashMap<Skey, V, BuildHasherDefault<SkeyHasher>>;
 /// An iterator over engine entries from a lower bound, in ascending key order.
 pub(crate) type NodeIter<'a> = Box<dyn Iterator<Item = SdbResult<(TableKey, TableValue)>> + 'a>;
 
+/// What a path walk needs to know about a node without materializing a packed
+/// blob (see [`ReadNodes::node_step`] and [`crate::tree::locate`]).
+pub(crate) enum NodeStep {
+    /// A packed entity: terminal — the walk descends via its blob.
+    Packed,
+    /// A list, carrying its element keys so a positional hop can index it.
+    List(Vec<Skey>),
+    /// Any other live node (object marker or leaf): only its presence matters, and
+    /// an object child is resolved by point lookup rather than by reading the node.
+    Plain,
+}
+
 /// Read access to a node store: point lookup plus an ordered forward scan.
 pub(crate) trait ReadNodes {
     fn fetch(&self, key: &TableKey) -> SdbResult<Option<TableValue>>;
@@ -64,6 +77,23 @@ pub(crate) trait ReadNodes {
     /// Entries at or after `lower`, in ascending key order. Callers stop as soon as
     /// a key falls outside the range they care about (e.g. a child block).
     fn scan_from(&self, lower: &TableKey) -> SdbResult<NodeIter<'_>>;
+
+    /// Classifies the node at `key` for a path walk — packed entity, list (with its
+    /// element keys), or anything else — **without materializing a packed blob**.
+    /// The default reads the node through [`fetch`](Self::fetch); the engine table
+    /// overrides it to inspect the stored value by reference, so classifying a
+    /// packed entity (the common terminal of a walk) never copies its blob.
+    fn node_step(&self, key: Skey) -> SdbResult<Option<NodeStep>> {
+        Ok(match self.fetch(&TableKey::Data(key))? {
+            Some(TableValue::Node(Node::Packed {
+                ..
+            })) => Some(NodeStep::Packed),
+            Some(TableValue::Node(Node::List(items))) => Some(NodeStep::List(items)),
+            Some(TableValue::Node(_)) => Some(NodeStep::Plain),
+            Some(_) => return Err(SdbError::Corrupt("expected a node at a data key".into())),
+            None => None,
+        })
+    }
 
     /// The child key under object `parent` for field `name`. The default builds the
     /// `Child` key and fetches it; the in-memory backend overrides this to look up
@@ -94,7 +124,7 @@ pub(crate) trait WriteNodes: ReadNodes {
 
 impl<T: ReadableTable<TableKey, TableValue>> ReadNodes for T {
     fn fetch(&self, key: &TableKey) -> SdbResult<Option<TableValue>> {
-        Ok(self.get(key)?.map(|guard| guard.value()))
+        Ok(self.get(key)?.map(|guard| guard.value().into_owned()))
     }
 
     fn scan_from(&self, lower: &TableKey) -> SdbResult<NodeIter<'_>> {
@@ -103,14 +133,31 @@ impl<T: ReadableTable<TableKey, TableValue>> ReadNodes for T {
         Ok(Box::new(range.map(|item| {
             let (key, value) = item?;
 
-            Ok((key.value(), value.value()))
+            Ok((key.value(), value.value().into_owned()))
         })))
+    }
+
+    // Classifies a stored value by reference — a packed entity's blob is never
+    // copied just to learn that the node is packed (the win over the default,
+    // which materializes the whole owned value).
+    fn node_step(&self, key: Skey) -> SdbResult<Option<NodeStep>> {
+        match self.get(&TableKey::Data(key))? {
+            None => Ok(None),
+            Some(guard) => match guard.value() {
+                TableValueRef::Node(NodeRef::Packed {
+                    ..
+                }) => Ok(Some(NodeStep::Packed)),
+                TableValueRef::Node(NodeRef::List(items)) => Ok(Some(NodeStep::List(items.into_owned()))),
+                TableValueRef::Node(_) => Ok(Some(NodeStep::Plain)),
+                _ => Err(SdbError::Corrupt("expected a node at a data key".into())),
+            },
+        }
     }
 }
 
 impl WriteNodes for Table<'_, TableKey, TableValue> {
     fn put(&mut self, key: TableKey, value: TableValue) -> SdbResult<()> {
-        self.insert(&key, &value)?;
+        self.insert(&key, value.as_ref())?;
         Ok(())
     }
 

@@ -86,7 +86,7 @@ pub(crate) fn insert(data: &mut DataTable<'_>, indexes: &[IndexEntry], scope: &S
                 guard_unique(data, &key, &value, entry.def().name())?;
             }
 
-            data.insert(&key, &value)?;
+            data.insert(&key, value.as_ref())?;
         }
     }
 
@@ -103,7 +103,7 @@ fn guard_unique(data: &DataTable<'_>, key: &TableKey, value: &TableValue, index:
     };
 
     if let Some(existing) = data.get(key)?
-        && matches!(existing.value(), TableValue::Skey(other) if other != *entity)
+        && matches!(existing.value().into_owned(), TableValue::Skey(other) if other != *entity)
     {
         return Err(SdbError::UniqueViolation {
             index: index.to_string(),
