@@ -25,3 +25,18 @@ impl Direction {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn byte_roundtrip_and_rejects_unknown() {
+        assert_eq!(Direction::from_byte(Direction::Asc.to_byte()).unwrap(), Direction::Asc);
+        assert_eq!(
+            Direction::from_byte(Direction::Desc.to_byte()).unwrap(),
+            Direction::Desc
+        );
+        assert!(matches!(Direction::from_byte(9), Err(SdbError::Corrupt(_))));
+    }
+}

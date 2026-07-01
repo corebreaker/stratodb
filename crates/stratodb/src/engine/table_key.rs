@@ -387,4 +387,67 @@ mod tests {
 
         assert!(short.encode() < long.encode());
     }
+
+    /// The field-computed `Ord` must reproduce the encoded byte order exactly, so
+    /// an in-memory `BTreeMap<TableKey, _>` orders keys as the engine does.
+    #[test]
+    fn ord_matches_the_encoded_byte_order() {
+        let ordered = [
+            TableKey::Data(skey(0)),
+            TableKey::Data(skey(u128::MAX)),
+            TableKey::Child {
+                parent: skey(0),
+                name:   String::new(),
+            },
+            TableKey::Child {
+                parent: skey(0),
+                name:   String::from("age"),
+            },
+            TableKey::Child {
+                parent: skey(1),
+                name:   String::from("age"),
+            },
+            TableKey::Index {
+                id:     IndexId(0),
+                cols:   vec![1],
+                entity: Some(skey(0)),
+            },
+            TableKey::Index {
+                id:     IndexId(0),
+                cols:   vec![1],
+                entity: Some(skey(1)),
+            },
+            TableKey::Index {
+                id:     IndexId(1),
+                cols:   vec![0],
+                entity: Some(skey(0)),
+            },
+            TableKey::Index {
+                id:     IndexId(1),
+                cols:   vec![0],
+                entity: None,
+            },
+        ];
+
+        for pair in ordered.windows(2) {
+            assert_eq!(pair[0].cmp(&pair[1]), Ordering::Less);
+            assert!(pair[0] < pair[1]); // exercises PartialOrd too
+            assert_eq!(pair[0].encode().cmp(&pair[1].encode()), Ordering::Less);
+        }
+
+        // Identical keys compare Equal (the same-variant tie arms).
+        for key in &ordered {
+            assert_eq!(key.cmp(key), Ordering::Equal);
+        }
+    }
+
+    #[test]
+    fn decode_rejects_malformed_keys() {
+        assert!(TableKey::decode(&[]).is_err()); // empty
+        assert!(TableKey::decode(&[tag::DATA, 1, 2, 3]).is_err()); // data key: not 16 bytes
+        assert!(TableKey::decode(&[tag::CHILD, 0, 1]).is_err()); // child: missing parent
+        assert!(TableKey::decode(&[tag::INDEX_DUP, 0, 1]).is_err()); // index: missing id
+        assert!(TableKey::decode(&[tag::INDEX_DUP, 0, 0, 0, 1, 9]).is_err()); // dup: missing entity
+        assert!(TableKey::decode(&[0xFF]).is_err()); // unknown tag
+    }
 }

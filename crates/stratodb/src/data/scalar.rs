@@ -425,9 +425,18 @@ mod tests {
     fn scalar_roundtrips() {
         roundtrip(Scalar::Null);
         roundtrip(Scalar::Bool(true));
+        roundtrip(Scalar::Bool(false));
+        roundtrip(Scalar::I8(-8));
+        roundtrip(Scalar::I16(-1600));
         roundtrip(Scalar::I32(-42));
+        roundtrip(Scalar::I64(-64));
         roundtrip(Scalar::I128(i128::MIN));
+        roundtrip(Scalar::U8(200));
+        roundtrip(Scalar::U16(60000));
+        roundtrip(Scalar::U32(u32::MAX));
         roundtrip(Scalar::U64(u64::MAX));
+        roundtrip(Scalar::U128(u128::MAX));
+        roundtrip(Scalar::F32(-1.5));
         roundtrip(Scalar::F64(-1.5));
         roundtrip(Scalar::Str(String::from("héllo/[world]")));
         roundtrip(Scalar::Bytes(vec![0, 1, 2, 255]));
@@ -447,6 +456,86 @@ mod tests {
         ));
 
         roundtrip(Scalar::Duration(TimeDelta::nanoseconds(1)));
+    }
+
+    #[test]
+    fn type_str_labels_every_base_variant() {
+        assert_eq!(Scalar::Null.type_str(), "null");
+        assert_eq!(Scalar::Bool(true).type_str(), "bool");
+        assert_eq!(Scalar::I8(0).type_str(), "i8");
+        assert_eq!(Scalar::I16(0).type_str(), "i16");
+        assert_eq!(Scalar::I32(0).type_str(), "i32");
+        assert_eq!(Scalar::I64(0).type_str(), "i64");
+        assert_eq!(Scalar::I128(0).type_str(), "i128");
+        assert_eq!(Scalar::U8(0).type_str(), "u8");
+        assert_eq!(Scalar::U16(0).type_str(), "u16");
+        assert_eq!(Scalar::U32(0).type_str(), "u32");
+        assert_eq!(Scalar::U64(0).type_str(), "u64");
+        assert_eq!(Scalar::U128(0).type_str(), "u128");
+        assert_eq!(Scalar::F32(0.0).type_str(), "f32");
+        assert_eq!(Scalar::F64(0.0).type_str(), "f64");
+        assert_eq!(Scalar::Str(String::new()).type_str(), "str");
+        assert_eq!(Scalar::Bytes(vec![]).type_str(), "bytes");
+        assert_eq!(Scalar::Uuid(Uuid::nil()).type_str(), "uuid");
+        assert_eq!(
+            Scalar::Date(NaiveDate::from_ymd_opt(2000, 1, 1).unwrap()).type_str(),
+            "date"
+        );
+        assert_eq!(
+            Scalar::Time(NaiveTime::from_hms_opt(0, 0, 0).unwrap()).type_str(),
+            "time"
+        );
+        assert_eq!(
+            Scalar::DateTime(
+                NaiveDate::from_ymd_opt(2000, 1, 1)
+                    .unwrap()
+                    .and_hms_opt(0, 0, 0)
+                    .unwrap()
+                    .and_utc(),
+            )
+            .type_str(),
+            "datetime"
+        );
+
+        assert_eq!(Scalar::Duration(TimeDelta::zero()).type_str(), "duration");
+    }
+
+    #[cfg(feature = "bigint-as-scalar")]
+    #[test]
+    fn type_str_labels_bigint() {
+        assert_eq!(Scalar::BigInt(BigInt::from(0)).type_str(), "bigint");
+    }
+
+    #[cfg(feature = "bigfloat-as-scalar")]
+    #[test]
+    fn type_str_labels_bigfloat() {
+        assert_eq!(Scalar::BigFloat(FLOAT_ZERO).type_str(), "bigfloat");
+    }
+
+    #[cfg(feature = "rational-as-scalar")]
+    #[test]
+    fn type_str_labels_rational() {
+        assert_eq!(
+            Scalar::Rational(BigRational::new(BigInt::from(0), BigInt::from(1))).type_str(),
+            "rational"
+        );
+    }
+
+    #[test]
+    fn decode_rejects_an_unknown_tag() {
+        let mut reader = Reader::new(&[0xFF]);
+        let err = Scalar::decode(&mut reader).unwrap_err();
+
+        assert!(matches!(err, SdbError::Corrupt(_)));
+    }
+
+    #[test]
+    fn decode_rejects_invalid_utf8_in_a_string() {
+        let mut buf = vec![tag::STR];
+        codec::put_bytes(&mut buf, &[0xFF, 0xFE]);
+
+        let err = Scalar::decode(&mut Reader::new(&buf)).unwrap_err();
+        assert!(matches!(err, SdbError::Corrupt(_)));
     }
 
     #[cfg(feature = "bigint-as-scalar")]

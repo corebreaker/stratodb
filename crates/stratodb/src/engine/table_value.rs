@@ -234,3 +234,50 @@ impl RedbValue for TableValue {
         TypeName::new("stratodb::TableValue")
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn decode_rejects_unknown_tags() {
+        // Unknown leading (value) tag.
+        assert!(matches!(TableValueRef::decode(&[0xFF]), Err(SdbError::Corrupt(_))));
+
+        // Valid value tag, but an unknown inner node tag.
+        assert!(matches!(
+            TableValueRef::decode(&[tag::NODE, 0xFF]),
+            Err(SdbError::Corrupt(_))
+        ));
+    }
+
+    #[test]
+    fn every_variant_roundtrips_through_borrowed_bytes() {
+        let values = [
+            TableValue::Node(Node::Object),
+            TableValue::Node(Node::List(vec![Skey::ROOT])),
+            TableValue::Node(Node::Leaf(Scalar::I32(1))),
+            TableValue::Node(Node::Packed {
+                root: NodeKind::Object,
+                blob: vec![1, 2, 3],
+            }),
+            TableValue::Skey(Skey::ROOT),
+            TableValue::Unit,
+        ];
+
+        for value in values {
+            let mut buf = Vec::new();
+            value.as_ref().encode(&mut buf);
+
+            // `TableValue` has no `PartialEq`, so compare via a re-encode.
+            let mut round = Vec::new();
+            TableValueRef::decode(&buf)
+                .unwrap()
+                .into_owned()
+                .as_ref()
+                .encode(&mut round);
+
+            assert_eq!(buf, round);
+        }
+    }
+}

@@ -466,3 +466,168 @@ impl WriteNodes for MemNodes {
         Ok(())
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::index::IndexId;
+
+    fn skey(n: u128) -> Skey {
+        Skey::from(n)
+    }
+
+    fn child(parent: Skey, name: &str) -> TableKey {
+        TableKey::Child {
+            parent,
+            name: name.to_string(),
+        }
+    }
+
+    fn index_key() -> TableKey {
+        TableKey::Index {
+            id:     IndexId(0),
+            cols:   vec![],
+            entity: None,
+        }
+    }
+
+    /// Builds a small object tree: root → { a: leaf(7), b: [] }.
+    fn populated() -> (MemNodes, Skey, Skey, Skey) {
+        let mut nodes = MemNodes::new();
+        let (root, a, b) = (Skey::ROOT, skey(1), skey(2));
+
+        nodes.put(TableKey::Data(root), TableValue::Node(Node::Object)).unwrap();
+        nodes.put(child(root, "a"), TableValue::Skey(a)).unwrap();
+        nodes
+            .put(TableKey::Data(a), TableValue::Node(Node::Leaf(Scalar::I32(7))))
+            .unwrap();
+        nodes.put(child(root, "b"), TableValue::Skey(b)).unwrap();
+        nodes
+            .put(TableKey::Data(b), TableValue::Node(Node::List(vec![])))
+            .unwrap();
+
+        // Re-applying the object marker keeps the children (idempotent arm).
+        nodes.put(TableKey::Data(root), TableValue::Node(Node::Object)).unwrap();
+
+        (nodes, root, a, b)
+    }
+
+    #[test]
+    fn fetch_child_link_and_node_step() {
+        let (nodes, root, a, b) = populated();
+
+        assert!(matches!(
+            nodes.fetch(&TableKey::Data(root)).unwrap(),
+            Some(TableValue::Node(Node::Object))
+        ));
+        assert!(nodes.fetch(&child(root, "a")).unwrap().is_some());
+        assert!(nodes.fetch(&index_key()).unwrap().is_none());
+
+        assert_eq!(nodes.child_link(root, "a").unwrap(), Some(a));
+        assert_eq!(nodes.child_link(root, "missing").unwrap(), None);
+        assert_eq!(nodes.child_link(a, "x").unwrap(), None); // parent is a leaf
+
+        assert!(matches!(nodes.node_step(root).unwrap(), Some(NodeStep::Plain)));
+        assert!(matches!(nodes.node_step(a).unwrap(), Some(NodeStep::Plain)));
+        assert!(matches!(nodes.node_step(b).unwrap(), Some(NodeStep::List(_))));
+        assert!(nodes.node_step(skey(999)).unwrap().is_none());
+    }
+
+    #[test]
+    fn scan_from_walks_a_parents_child_block_only() {
+        let (nodes, root, ..) = populated();
+
+        let scanned: Vec<TableKey> = nodes
+            .scan_from(&child(root, ""))
+            .unwrap()
+            .map(|item| item.unwrap().0)
+            .collect();
+        assert_eq!(scanned, vec![child(root, "a"), child(root, "b")]);
+
+        // A non-`Child` lower bound, and a parent that is not an object, both scan empty.
+        assert_eq!(nodes.scan_from(&TableKey::Data(root)).unwrap().count(), 0);
+        assert_eq!(nodes.scan_from(&child(skey(999), "")).unwrap().count(), 0);
+    }
+
+    #[test]
+    fn delete_removes_children_nodes_and_ignores_index() {
+        let (mut nodes, root, a, _b) = populated();
+
+        nodes.delete(&child(root, "a")).unwrap();
+        assert_eq!(nodes.child_link(root, "a").unwrap(), None);
+
+        nodes.delete(&TableKey::Data(a)).unwrap();
+        assert!(nodes.fetch(&TableKey::Data(a)).unwrap().is_none());
+
+        nodes.delete(&index_key()).unwrap(); // no-op, no error
+    }
+
+    #[test]
+    fn blob_and_entries_roundtrip() {
+        let (nodes, root, a, b) = populated();
+
+        let blob = nodes.clone().into_blob().unwrap();
+        let restored = MemNodes::from_blob(&blob).unwrap();
+        assert_eq!(restored.root_kind().unwrap(), NodeKind::Object);
+        assert_eq!(restored.child_link(root, "a").unwrap(), Some(a));
+        assert_eq!(restored.child_link(root, "b").unwrap(), Some(b));
+
+        // `into_entries` yields the object marker, each child link, the list and leaf.
+        let entries: Vec<TableKey> = nodes.into_entries().map(|(key, _)| key).collect();
+        assert!(entries.contains(&TableKey::Data(root)));
+        assert!(entries.contains(&child(root, "a")));
+        assert!(entries.contains(&TableKey::Data(a)));
+    }
+
+    #[test]
+    fn an_empty_store_packs_as_an_empty_object() {
+        let nodes = MemNodes::new();
+        assert_eq!(nodes.root_kind().unwrap(), NodeKind::Object);
+
+        let blob = nodes.into_blob().unwrap(); // exercises the empty-nodes push
+        let restored = MemNodes::from_blob(&blob).unwrap();
+        assert_eq!(restored.root_kind().unwrap(), NodeKind::Object);
+    }
+
+    #[test]
+    fn corrupt_entries_are_rejected() {
+        let mut nodes = MemNodes::new();
+
+        // A nested packed entity inside a blob.
+        assert!(
+            nodes
+                .put(
+                    TableKey::Data(Skey::ROOT),
+                    TableValue::Node(Node::Packed {
+                        root: NodeKind::Object,
+                        blob: vec![],
+                    }),
+                )
+                .is_err()
+        );
+
+        // A data entry whose value is not a node.
+        assert!(
+            nodes
+                .put(TableKey::Data(Skey::ROOT), TableValue::Skey(Skey::ROOT))
+                .is_err()
+        );
+
+        // A child link whose value is not a key.
+        assert!(
+            nodes
+                .put(child(Skey::ROOT, "a"), TableValue::Node(Node::Object))
+                .is_err()
+        );
+
+        // An index entry does not belong in a blob.
+        assert!(nodes.put(index_key(), TableValue::Skey(Skey::ROOT)).is_err());
+
+        // A child link whose parent node is not an object.
+        let leaf_parent = skey(5);
+        nodes
+            .put(TableKey::Data(leaf_parent), TableValue::Node(Node::Leaf(Scalar::Null)))
+            .unwrap();
+        assert!(nodes.put(child(leaf_parent, "a"), TableValue::Skey(skey(6))).is_err());
+    }
+}

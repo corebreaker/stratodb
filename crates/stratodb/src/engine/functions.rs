@@ -45,3 +45,49 @@ pub(crate) fn bootstrap_metadata(db: &Database) -> SdbResult<()> {
     txn.commit()?;
     Ok(())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use redb::backends::InMemoryBackend;
+
+    fn in_memory() -> Database {
+        Database::builder().create_with_backend(InMemoryBackend::new()).unwrap()
+    }
+
+    fn set_version(db: &Database, bytes: &[u8]) {
+        let txn = db.begin_write().unwrap();
+        {
+            let mut table = txn.open_table(META_TABLE).unwrap();
+            table.insert(META_FORMAT_VERSION_KEY, bytes).unwrap();
+        }
+
+        txn.commit().unwrap();
+    }
+
+    #[test]
+    fn bootstrap_is_idempotent_on_a_matching_version() {
+        let db = in_memory();
+
+        bootstrap_metadata(&db).unwrap(); // writes the current version (None branch)
+        bootstrap_metadata(&db).unwrap(); // sees a matching version, no-op
+    }
+
+    #[test]
+    fn bootstrap_rejects_a_mismatched_version() {
+        let db = in_memory();
+        bootstrap_metadata(&db).unwrap();
+        set_version(&db, &(FORMAT_VERSION + 1).to_be_bytes());
+
+        assert!(matches!(bootstrap_metadata(&db), Err(SdbError::SchemaMismatch(_))));
+    }
+
+    #[test]
+    fn bootstrap_rejects_a_malformed_version() {
+        let db = in_memory();
+        bootstrap_metadata(&db).unwrap();
+        set_version(&db, &[1, 2, 3]); // not the four bytes of a u32
+
+        assert!(matches!(bootstrap_metadata(&db), Err(SdbError::Corrupt(_))));
+    }
+}

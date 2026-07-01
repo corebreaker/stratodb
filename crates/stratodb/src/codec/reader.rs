@@ -58,3 +58,24 @@ impl<'a> Reader<'a> {
         self.pos >= self.buf.len()
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn reading_past_the_end_is_an_error() {
+        let mut r = Reader::new(&[1, 2]);
+
+        assert_eq!(r.u8().unwrap(), 1);
+        assert!(r.u32().is_err()); // only one byte remains
+    }
+
+    #[test]
+    fn a_bogus_length_prefix_is_rejected() {
+        // `bytes()` reads a u32 length then that many bytes; a huge length overruns.
+        let mut r = Reader::new(&[0xFF, 0xFF, 0xFF, 0xFF, 0x00]);
+
+        assert!(r.bytes().is_err());
+    }
+}

@@ -152,3 +152,66 @@ impl Display for Skey {
         write!(f, "key:{}", self.0)
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn generate_yields_distinct_non_root_keys() {
+        let a = Skey::generate();
+        let b = Skey::generate();
+
+        assert_ne!(a, b);
+        assert_ne!(a, Skey::ROOT);
+    }
+
+    #[test]
+    fn raw_byte_roundtrip() {
+        let key = Skey::generate();
+        assert_eq!(Skey::from_bytes(key.into_bytes()), key);
+        assert_eq!(Skey::from([0u8; 16]), Skey::ROOT);
+    }
+
+    #[test]
+    fn try_from_bytes_enforces_the_length() {
+        let bytes = [7u8; 16];
+        assert_eq!(Skey::try_from_bytes(&bytes).unwrap(), Skey::from(bytes));
+
+        let err = Skey::try_from_bytes(&[0u8; 15]).unwrap_err();
+        assert!(matches!(err, SdbError::BadKey(_)));
+
+        // The `TryFrom<Vec<u8>>` path shares the same check.
+        assert!(Skey::try_from(vec![0u8; 16]).is_ok());
+        assert!(Skey::try_from(vec![0u8; 17]).is_err());
+    }
+
+    #[test]
+    fn integer_and_uuid_conversions_roundtrip() {
+        let key = Skey::from(0x0123_4567_89AB_CDEF_u128);
+        assert_eq!(u128::from(key), 0x0123_4567_89AB_CDEF);
+
+        let uuid = Uuid::from_u128(42);
+        assert_eq!(Uuid::from(Skey::from(uuid)), uuid);
+
+        let bytes: Vec<u8> = Skey::from(0u128).into();
+        assert_eq!(bytes, vec![0u8; 16]);
+    }
+
+    #[test]
+    fn parses_from_a_uuid_string() {
+        let uuid = Uuid::from_u128(0xDEAD_BEEF);
+        let text = uuid.to_string();
+
+        assert_eq!(Skey::from_str(&text).unwrap(), Skey::from(uuid));
+        assert!(matches!(Skey::from_str("not-a-uuid"), Err(SdbError::BadKey(_))));
+    }
+
+    #[test]
+    fn debug_and_display_render_distinctly() {
+        let key = Skey::from(Uuid::nil());
+
+        assert_eq!(format!("{key:?}"), "Skey(00000000-0000-0000-0000-000000000000)");
+        assert_eq!(key.to_string(), "key:00000000-0000-0000-0000-000000000000");
+    }
+}

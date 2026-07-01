@@ -196,3 +196,70 @@ impl Reader for ReadCursor<'_> {
         self.txn.lookup_object_keys(key)
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::StratoDb;
+
+    fn p(s: &str) -> SPath {
+        SPath::parse(s).unwrap()
+    }
+
+    // `R` is opaque here, so every call dispatches through `<R as Reader>`. Passing
+    // an `Arc`/`Box<dyn Reader>` therefore exercises the forwarding impls — a direct
+    // call on the concrete pointer would deref straight to the trait object.
+    fn exercise<R: Reader>(reader: &R) {
+        let a = reader.resolve(&p("a")).unwrap().unwrap();
+        let x = reader.resolve(&p("a/x")).unwrap().unwrap();
+        let items = reader.resolve(&p("items")).unwrap().unwrap();
+
+        assert!(reader.child(a, &Segment::Name("x".into())).unwrap().is_some());
+        assert!(
+            reader
+                .child_cached(a, &Segment::Name("x".into()), &p("a/x"))
+                .unwrap()
+                .is_some()
+        );
+        assert_eq!(reader.kind(a).unwrap(), Some(NodeKind::Object));
+        assert_eq!(reader.kind(items).unwrap(), Some(NodeKind::List));
+        assert_eq!(reader.len(items).unwrap(), 2);
+        assert_eq!(reader.object_keys(a).unwrap(), vec![String::from("x")]);
+        assert_eq!(reader.scalar_at(&p("a/x")).unwrap(), Some(Scalar::U32(1)));
+        assert_eq!(reader.scalar(x).unwrap(), Scalar::U32(1));
+
+        // Reading a node as the wrong kind surfaces the tree's kind guards.
+        assert!(reader.scalar(a).is_err()); // object, not a leaf
+        assert!(reader.len(a).is_err()); // object, not a list
+        assert!(reader.object_keys(x).is_err()); // leaf, not an object
+
+        // A cached-child lookup on a path not yet resolved takes the cache-miss
+        // branch (resolve, then populate the cache).
+        assert!(
+            reader
+                .child_cached(items, &Segment::Index(0), &p("items[0]"))
+                .unwrap()
+                .is_some()
+        );
+    }
+
+    #[test]
+    fn boxed_and_arced_dyn_readers_forward_every_method() {
+        let db = StratoDb::create_in_memory().unwrap();
+        let table = db.open_table("t").unwrap();
+
+        let w = table.write().unwrap();
+        w.put("a/x", &1u32).unwrap();
+        w.put("items[0]", &10i32).unwrap();
+        w.put("items[1]", &20i32).unwrap();
+        w.commit().unwrap();
+
+        let txn = table.read().unwrap();
+
+        let boxed: Box<dyn Reader + '_> = Box::new(ReadCursor::new(&txn));
+        exercise(&boxed);
+
+        let arced: Arc<dyn Reader + '_> = Arc::new(ReadCursor::new(&txn));
+        exercise(&arced);
+    }
+}

@@ -194,4 +194,18 @@ mod tests {
         assert!(Pattern::parse("users//*").is_err());
         assert!(Pattern::parse("/users").is_err());
     }
+
+    #[test]
+    fn covers_strictly_below_needs_a_deeper_matching_pattern() {
+        let pattern = Pattern::parse("users/*/tags").unwrap();
+
+        // The pattern reaches deeper than the base, matching it via the wildcard.
+        assert!(pattern.covers_strictly_below(&SPath::parse("users/alice").unwrap()));
+
+        // A base at (or past) the pattern's depth is not strictly below it.
+        assert!(!pattern.covers_strictly_below(&SPath::parse("users/alice/tags").unwrap()));
+
+        // A base that diverges from a leading literal is not covered.
+        assert!(!pattern.covers_strictly_below(&SPath::parse("orders/x").unwrap()));
+    }
 }

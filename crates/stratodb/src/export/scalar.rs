@@ -109,10 +109,34 @@ mod tests {
 
     #[test]
     fn numbers_are_verbatim() {
-        assert_eq!(render(Scalar::U8(7)), "7");
+        assert_eq!(render(Scalar::Bool(true)), "true");
+        assert_eq!(render(Scalar::Bool(false)), "false");
+        assert_eq!(render(Scalar::I8(-8)), "-8");
+        assert_eq!(render(Scalar::I16(-16)), "-16");
+        assert_eq!(render(Scalar::I32(-32)), "-32");
+        assert_eq!(render(Scalar::I64(-64)), "-64");
         assert_eq!(render(Scalar::I128(i128::MIN)), i128::MIN.to_string());
+        assert_eq!(render(Scalar::U8(7)), "7");
+        assert_eq!(render(Scalar::U16(16)), "16");
+        assert_eq!(render(Scalar::U32(32)), "32");
+        assert_eq!(render(Scalar::U64(64)), "64");
         assert_eq!(render(Scalar::U128(u128::MAX)), u128::MAX.to_string());
+        assert_eq!(render(Scalar::F32(1.5)), "1.5");
         assert_eq!(render(Scalar::F64(1.5)), "1.5");
+    }
+
+    #[cfg(feature = "bigfloat-as-scalar")]
+    #[test]
+    fn big_float_renders_as_a_literal_or_null() {
+        use num_bigfloat::{BigFloat, INF_POS, NAN};
+
+        // A finite value renders as its (fixed-precision) decimal literal, not `null`.
+        let finite = render(Scalar::BigFloat(BigFloat::from_f64(1.5)));
+        assert!(finite.starts_with("1.5"), "got {finite}");
+
+        // The non-finite values share the float fallback to `null`.
+        assert_eq!(render(Scalar::BigFloat(NAN)), "null");
+        assert_eq!(render(Scalar::BigFloat(INF_POS)), "null");
     }
 
     #[test]

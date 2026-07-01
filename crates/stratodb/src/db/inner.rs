@@ -144,3 +144,55 @@ impl DbInner {
         &self.version_lock
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use redb::backends::InMemoryBackend;
+    use std::panic::{catch_unwind, AssertUnwindSafe};
+
+    fn inner() -> DbInner {
+        let db = Database::builder().create_with_backend(InMemoryBackend::new()).unwrap();
+
+        DbInner::new(db)
+    }
+
+    /// Poisons `mutex` by panicking while its lock is held (panic hook silenced).
+    fn poison<T>(mutex: &Mutex<T>) {
+        let previous = std::panic::take_hook();
+        std::panic::set_hook(Box::new(|_| {}));
+
+        let _ = catch_unwind(AssertUnwindSafe(|| {
+            let _guard = mutex.lock().unwrap();
+
+            panic!("poison the mutex");
+        }));
+
+        std::panic::set_hook(previous);
+    }
+
+    #[test]
+    fn cache_reports_a_poisoned_registry() {
+        let inner = inner();
+        poison(&inner.caches);
+
+        assert!(matches!(inner.cache("t"), Err(SdbError::CannotAccess(_))));
+    }
+
+    #[test]
+    fn cached_indexes_reports_a_poisoned_mutex_on_either_lock() {
+        // Poisoned before the call: the first lock fails.
+        let first = inner();
+        poison(&first.index_sets);
+        assert!(first.cached_indexes("t", || Ok(vec![])).is_err());
+
+        // Poisoned by `load`, between the two locks: the second lock fails.
+        let second = inner();
+        let result = second.cached_indexes("t", || {
+            poison(&second.index_sets);
+
+            Ok(vec![])
+        });
+        assert!(result.is_err());
+    }
+}

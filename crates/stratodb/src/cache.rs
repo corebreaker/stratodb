@@ -97,3 +97,36 @@ impl PathCache {
         Ok(())
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::panic::{catch_unwind, AssertUnwindSafe};
+
+    /// Poisons `mutex` by panicking while its lock is held, silencing the panic
+    /// hook so the deliberate panic does not clutter test output.
+    fn poison<T>(mutex: &Mutex<T>) {
+        let previous = std::panic::take_hook();
+        std::panic::set_hook(Box::new(|_| {}));
+
+        let _ = catch_unwind(AssertUnwindSafe(|| {
+            let _guard = mutex.lock().unwrap();
+
+            panic!("poison the mutex");
+        }));
+
+        std::panic::set_hook(previous);
+    }
+
+    #[test]
+    fn get_and_put_report_a_poisoned_path_mutex() {
+        let cache = PathCache::new(4, 4);
+        poison(&cache.entries);
+
+        assert!(matches!(cache.get(0, &SPath::root()), Err(SdbError::CannotAccess(_))));
+        assert!(matches!(
+            cache.put(0, &SPath::root(), Skey::ROOT),
+            Err(SdbError::CannotAccess(_))
+        ));
+    }
+}
