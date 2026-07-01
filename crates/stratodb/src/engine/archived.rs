@@ -40,6 +40,11 @@ pub(crate) struct ArchTree {
 }
 
 /// Serializes `tree` into a packed-entity blob.
+///
+/// rkyv returns an [`AlignedVec`]; the blob is held as a plain `Vec<u8>` in
+/// [`Node::Packed`](crate::node) and re-copied into redb's page on write anyway,
+/// so the one `to_vec` here keeps rkyv's alignment type out of the node model for
+/// a negligible cost rather than threading an `AlignedVec` through it.
 pub(crate) fn to_bytes(tree: &ArchTree) -> SdbResult<Vec<u8>> {
     let bytes = rkyv::to_bytes::<rancor::Error>(tree)
         .map_err(|err| SdbError::Corrupt(format!("rkyv serialize failed: {err}")))?;

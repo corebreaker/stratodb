@@ -184,9 +184,21 @@ impl WriteTxn {
     /// sequentially (a redb write transaction is single-threaded). Without the
     /// feature this is a plain sequential loop of [`store`](Self::store). Either
     /// way the result is exactly that of storing each pair in order.
+    ///
+    /// **No batch path may be an ancestor of another** (e.g. `users/alice` and
+    /// `users/alice/score` in the same call). Each entity is stored as one packed
+    /// blob, so the ancestor becomes an opaque packed node; a descendant stored
+    /// beside it would be linked into the engine as a `Child` the packed blob
+    /// cannot see, leaving that sub-path unresolvable. Store the whole entity **or**
+    /// its parts, never both in one batch. (Debug builds assert this.)
     #[cfg(feature = "parallel")]
     pub fn store_many<T: SData + Sync>(&self, items: &[(SPath, &T)]) -> SdbResult<()> {
         use rayon::prelude::*;
+
+        debug_assert!(
+            !has_ancestor_descendant_pair(items),
+            "store_many: no batch path may be an ancestor of another (e.g. `a/b` and `a/b/c`)"
+        );
 
         /// One pair's pre-built result: a ready packed node, or an index back into
         /// `items` for the (rare) pairs that cannot pack and fall back to `store`.
@@ -279,9 +291,15 @@ impl WriteTxn {
         Ok(())
     }
 
-    /// Sequential `store_many` when the `parallel` feature is off.
+    /// Sequential `store_many` when the `parallel` feature is off. Same contract as
+    /// the parallel variant, including the no-ancestor-descendant-pair rule.
     #[cfg(not(feature = "parallel"))]
     pub fn store_many<T: SData>(&self, items: &[(SPath, &T)]) -> SdbResult<()> {
+        debug_assert!(
+            !has_ancestor_descendant_pair(items),
+            "store_many: no batch path may be an ancestor of another (e.g. `a/b` and `a/b/c`)"
+        );
+
         for (path, value) in items {
             self.store_at(path, *value)?;
         }
@@ -520,15 +538,22 @@ impl WriteTxn {
         let mut encoded = Vec::new();
         scalar.encode(&mut encoded);
 
+        // Locate the target leaf's byte span for the fast path, dropping the archive
+        // view at the end of this block — before `blob` is ever mutated below — so
+        // there is a single, obvious point where navigation stops and editing begins.
         // The blob was just read from our own table (StratoDB wrote it), so navigate
         // it unchecked — the validation scan is O(blob size) and would dominate.
-        let arch = ArchivedNodes::new_unchecked(&blob);
-        if let Some(key) = tree::resolve_from(&arch, Skey::ROOT, rel)?
-            && let Some((offset, len)) = arch.leaf_byte_span(key)
-            && len == encoded.len()
-        {
-            drop(arch);
+        let span = {
+            let arch = ArchivedNodes::new_unchecked(&blob);
 
+            match tree::resolve_from(&arch, Skey::ROOT, rel)? {
+                Some(key) => arch.leaf_byte_span(key).filter(|(_, len)| *len == encoded.len()),
+                None => None,
+            }
+        };
+
+        // Fast path — a same-length leaf: splice the new bytes straight into the blob.
+        if let Some((offset, len)) = span {
             let mut blob = blob;
             blob[offset..offset + len].copy_from_slice(&encoded);
 
@@ -541,8 +566,6 @@ impl WriteTxn {
                 },
             );
         }
-
-        drop(arch);
 
         let mut mem = MemNodes::from_blob(&blob)?;
         tree::put_scalar_rel(&mut mem, Skey::ROOT, rel, scalar)?;
@@ -600,4 +623,22 @@ pub(crate) fn segment_path(seg: &Segment) -> SPath {
         Segment::Name(name) => SPath::root().child_name(name),
         Segment::Index(index) => SPath::root().child_index(*index),
     }
+}
+
+/// Whether any path in `items` is a strict ancestor of another (e.g. `a/b` and
+/// `a/b/c`) — the misuse [`WriteTxn::store_many`] forbids, since a packed ancestor
+/// entity can hold no engine child link to a descendant stored beside it. Guards
+/// `store_many` in debug builds; not run in release (the loop below is `any` over
+/// each path's strict prefixes against the set of all batch paths, so it stays
+/// linear in the total segment count).
+fn has_ancestor_descendant_pair<T>(items: &[(SPath, &T)]) -> bool {
+    use std::collections::HashSet;
+
+    let paths: HashSet<&[Segment]> = items.iter().map(|(path, _)| path.segments()).collect();
+
+    items.iter().any(|(path, _)| {
+        let segs = path.segments();
+
+        (1..segs.len()).any(|len| paths.contains(&segs[..len]))
+    })
 }
