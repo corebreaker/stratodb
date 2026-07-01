@@ -345,11 +345,12 @@ impl WriteTxn {
                 } => {
                     // A write transaction sees its own uncommitted blob; read it
                     // archived (zero-copy) just like a committed read, without the
-                    // shared cache (which serves committed snapshots only).
+                    // shared cache (which serves committed snapshots only). The blob
+                    // is one StratoDB wrote, so navigate it unchecked.
                     let arch = match tree::read_node(&table, entity)? {
                         Some(Node::Packed {
                             blob, ..
-                        }) => ArchivedNodes::new(&blob)?,
+                        }) => ArchivedNodes::new_unchecked(&blob),
                         _ => {
                             return Err(SdbError::Corrupt(
                                 "locate reported a packed entity that is not packed".into(),
@@ -488,18 +489,65 @@ impl WriteTxn {
 
     pub(crate) fn put_scalar_path(&self, path: &SPath, scalar: Scalar) -> SdbResult<()> {
         self.reindex_around(path, |table| match tree::locate(table, path)? {
-            // The path descends into a packed entity: read-modify-write its blob.
+            // The path descends into a packed entity.
             Located::Packed {
                 entity,
                 rel,
-            } => {
-                let mut mem = tree::decode_packed(table, entity)?;
-                tree::put_scalar_rel(&mut mem, Skey::ROOT, &rel, scalar)?;
-
-                tree::write_packed(table, entity, mem.into_packed()?)
-            }
+            } => Self::put_scalar_into_packed(table, entity, &rel, scalar),
             _ => tree::put_scalar(table, path, scalar),
         })
+    }
+
+    /// Stores `scalar` at `rel` inside the packed entity at `entity`.
+    ///
+    /// Fast path — a same-length overwrite of an existing leaf: the new scalar's
+    /// encoding is spliced straight into the blob's bytes, so a single-field update
+    /// (the common case, e.g. bumping a number) costs one read + one write with no
+    /// decode and no re-serialize. Anything else (a new field, a different-length
+    /// value, a non-leaf target) falls back to decoding the blob, editing the
+    /// in-memory node table, and re-serializing it.
+    fn put_scalar_into_packed(table: &mut DataTable<'_>, entity: Skey, rel: &SPath, scalar: Scalar) -> SdbResult<()> {
+        let Some(Node::Packed {
+            root,
+            blob,
+        }) = tree::read_node(table, entity)?
+        else {
+            return Err(SdbError::Corrupt(
+                "locate reported a packed entity that is not packed".into(),
+            ));
+        };
+
+        let mut encoded = Vec::new();
+        scalar.encode(&mut encoded);
+
+        // The blob was just read from our own table (StratoDB wrote it), so navigate
+        // it unchecked — the validation scan is O(blob size) and would dominate.
+        let arch = ArchivedNodes::new_unchecked(&blob);
+        if let Some(key) = tree::resolve_from(&arch, Skey::ROOT, rel)?
+            && let Some((offset, len)) = arch.leaf_byte_span(key)
+            && len == encoded.len()
+        {
+            drop(arch);
+
+            let mut blob = blob;
+            blob[offset..offset + len].copy_from_slice(&encoded);
+
+            return tree::write_packed(
+                table,
+                entity,
+                Node::Packed {
+                    root,
+                    blob,
+                },
+            );
+        }
+
+        drop(arch);
+
+        let mut mem = MemNodes::from_blob(&blob)?;
+        tree::put_scalar_rel(&mut mem, Skey::ROOT, rel, scalar)?;
+
+        tree::write_packed(table, entity, mem.into_packed()?)
     }
 
     pub(crate) fn ensure_container_at(&self, path: &SPath, list: bool) -> SdbResult<Skey> {

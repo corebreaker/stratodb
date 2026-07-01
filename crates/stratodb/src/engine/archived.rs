@@ -77,6 +77,22 @@ impl ArchivedNodes {
         })
     }
 
+    /// Copies `blob` into an aligned buffer **without** validating it.
+    ///
+    /// The rkyv validation walks the whole archive (O(blob size)), which dominates
+    /// a same-generation blob edit (see [`WriteTxn::put_scalar`](crate::txn::WriteTxn::put)).
+    /// A write transaction only ever navigates a blob **it just read from its own
+    /// table** — one StratoDB itself serialized — so the bytes are trusted and the
+    /// scan is skipped. Do not use this on an externally supplied blob.
+    pub(crate) fn new_unchecked(blob: &[u8]) -> Self {
+        let mut bytes = AlignedVec::new();
+        bytes.extend_from_slice(blob);
+
+        Self {
+            bytes,
+        }
+    }
+
     /// The archived tree. Safe: [`new`](Self::new) validated the bytes and they
     /// are immutable thereafter.
     fn tree(&self) -> &ArchivedArchTree {
@@ -92,6 +108,22 @@ impl ArchivedNodes {
             .binary_search_by(|pair| pair.0.cmp(&bytes))
             .ok()
             .map(|at| &nodes[at].1)
+    }
+
+    /// The `(offset, length)` of leaf `key`'s scalar bytes within the blob, or
+    /// `None` if `key` is absent or is not a leaf. The offset is relative to the
+    /// blob's start (the aligned copy is byte-identical to it), so a same-length
+    /// scalar update can patch those bytes in place — no decode + re-serialize.
+    pub(crate) fn leaf_byte_span(&self, key: Skey) -> Option<(usize, usize)> {
+        match self.node(key)? {
+            ArchivedArchNode::Leaf(bytes) => {
+                let base = self.bytes.as_ptr() as usize;
+                let at = bytes.as_slice().as_ptr() as usize;
+
+                Some((at - base, bytes.len()))
+            }
+            _ => None,
+        }
     }
 
     /// Every `(key, node view)` of the entity, materialized — used to rebuild a
