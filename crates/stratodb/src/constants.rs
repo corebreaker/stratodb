@@ -10,7 +10,7 @@ pub const METADATA_TABLE_NAME: &str = "$metadata";
 /// `store` whose subtree no index reaches into is written as a single packed value
 /// (a serialized mini node-table) rather than one engine entry per shredded node.
 /// v4 makes that packed value an rkyv-archived tree, navigated zero-copy on read
-/// (see [`crate::engine`]).
+/// (see the `engine` module).
 pub const FORMAT_VERSION: u32 = 4;
 
 /// A constant string key representing the metadata key for the format version.
