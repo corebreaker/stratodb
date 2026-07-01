@@ -8,7 +8,7 @@
 //!   ([`store`](crate::txn::WriteTxn::store)), read back ([`load`](crate::txn::ReadTxn::load)) or edited in place.
 //!
 //! A packed entity is serialized as exactly such a mini node-table (see
-//! [`MemNodes::to_blob`] / [`MemNodes::from_blob`]), so packing and unpacking is
+//! [`MemNodes::into_blob`] / [`MemNodes::from_blob`]), so packing and unpacking is
 //! just (de)serializing a `MemNodes` and the shredded tree logic is reused
 //! verbatim on both sides.
 
@@ -26,7 +26,33 @@ use crate::{
 };
 
 use redb::{ReadableTable, Table};
-use std::collections::{BTreeMap, HashMap};
+use std::{
+    collections::{BTreeMap, HashMap},
+    hash::{BuildHasherDefault, Hasher},
+};
+
+/// A trivial hasher for [`Skey`] keys. A `Skey` is 128 uniformly random bits
+/// (see [`Skey::generate`](crate::Skey::generate)), so folding its bytes into a
+/// `u64` is already a well-distributed hash — no need for SipHash's keyed setup.
+/// The packed build and every in-memory navigation are entirely `Skey`-keyed, so
+/// skipping that setup is a measurable saving on the hot path.
+#[derive(Default)]
+struct SkeyHasher(u64);
+
+impl Hasher for SkeyHasher {
+    fn finish(&self) -> u64 {
+        self.0
+    }
+
+    fn write(&mut self, bytes: &[u8]) {
+        for &byte in bytes {
+            self.0 = self.0.rotate_left(8) ^ u64::from(byte);
+        }
+    }
+}
+
+/// A [`Skey`]-keyed map using the trivial [`SkeyHasher`].
+type SkeyMap<V> = HashMap<Skey, V, BuildHasherDefault<SkeyHasher>>;
 
 /// An iterator over engine entries from a lower bound, in ascending key order.
 pub(crate) type NodeIter<'a> = Box<dyn Iterator<Item = SdbResult<(TableKey, TableValue)>> + 'a>;
@@ -129,11 +155,11 @@ impl MemNode {
 
 /// An in-memory mini node-table backing a packed entity. Objects store children
 /// inline for allocation-free navigation; the **on-disk blob is unchanged** — it
-/// is still the engine's `(key, value)` entry list (see [`to_blob`](Self::to_blob)
+/// is still the engine's `(key, value)` entry list (see [`into_blob`](Self::into_blob)
 /// / [`from_blob`](Self::from_blob)), just assembled into this faster shape.
 #[derive(Clone, Debug, Default)]
 pub(crate) struct MemNodes {
-    nodes: HashMap<Skey, MemNode>,
+    nodes: SkeyMap<MemNode>,
 }
 
 impl MemNodes {
@@ -152,24 +178,27 @@ impl MemNodes {
             .unwrap_or(NodeKind::Object))
     }
 
-    /// Serializes the store into a packed-entity blob: an rkyv-archived
-    /// [`ArchTree`] of `(key, node)` pairs sorted by key (children reference one
-    /// another by key, preserving node identity). Leaf scalars keep the byte codec.
-    pub(crate) fn to_blob(&self) -> SdbResult<Vec<u8>> {
+    /// Serializes the store into a packed-entity blob, **consuming** it: an
+    /// rkyv-archived [`ArchTree`] of `(key, node)` pairs sorted by key (children
+    /// reference one another by key, preserving node identity). Leaf scalars keep
+    /// the byte codec. Consuming lets each field name and list element **move**
+    /// straight into the archive instead of being cloned — the build already owns
+    /// them, so the pack pays no second allocation per name.
+    fn into_blob(self) -> SdbResult<Vec<u8>> {
         let mut nodes: Vec<([u8; 16], ArchNode)> = self
             .nodes
-            .iter()
+            .into_iter()
             .map(|(key, node)| {
                 let arch = match node {
-                    // `children` is a `BTreeMap`, so the pairs come out name-sorted —
-                    // exactly what the read-side binary search over names relies on.
+                    // `children` is a `BTreeMap`, so it drains name-sorted — exactly
+                    // what the read-side binary search over names relies on.
                     MemNode::Object(children) => ArchNode::Object(
                         children
-                            .iter()
-                            .map(|(name, child)| (name.clone(), child.into_bytes()))
+                            .into_iter()
+                            .map(|(name, child)| (name, child.into_bytes()))
                             .collect(),
                     ),
-                    MemNode::List(items) => ArchNode::List(items.iter().map(|child| child.into_bytes()).collect()),
+                    MemNode::List(items) => ArchNode::List(items.into_iter().map(|child| child.into_bytes()).collect()),
                     MemNode::Leaf(scalar) => {
                         let mut bytes = Vec::new();
                         scalar.encode(&mut bytes);
@@ -199,7 +228,7 @@ impl MemNodes {
     pub(crate) fn from_blob(blob: &[u8]) -> SdbResult<MemNodes> {
         let arch = ArchivedNodes::new(blob)?;
 
-        let mut nodes = HashMap::new();
+        let mut nodes = SkeyMap::default();
         for (key, view) in arch.entries()? {
             let node = match view {
                 NodeView::Object(pairs) => MemNode::Object(pairs.into_iter().collect()),
@@ -270,9 +299,12 @@ impl MemNodes {
 
     /// Packs this store into a [`Node::Packed`] carrying its root kind and blob.
     pub(crate) fn into_packed(self) -> SdbResult<Node> {
+        // Read the root kind before `into_blob` consumes the store.
+        let root = self.root_kind()?;
+
         Ok(Node::Packed {
-            root: self.root_kind()?,
-            blob: self.to_blob()?,
+            root,
+            blob: self.into_blob()?,
         })
     }
 
